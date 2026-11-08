@@ -31,6 +31,13 @@ fn invalidate_cache(c: &Connection, id: &ArticleId) -> Result<()> {
     }
     Ok(())
 }
+/// Deleting an article also removes a saved local copy; archiving keeps it.
+fn remove_local_copy(c: &Connection, id: &ArticleId) -> Result<()> {
+    if crate::db_compat::is_lean(c)? && crate::storage::database_path(c)?.is_some() {
+        crate::storage::Storage::for_database(c)?.saved_remove(&id.0)?;
+    }
+    Ok(())
+}
 fn article_row(r: &Row<'_>) -> rusqlite::Result<Article> {
     let status: String = r.get(7)?;
     let status = CopyStatus::parse(&status).map_err(|e| {
@@ -242,6 +249,9 @@ pub fn delete(c: &mut Connection, ids: &[ArticleId]) -> Result<usize> {
         tx.execute("DELETE FROM article_media AS media WHERE user_id=?1 AND article_id=?2 AND NOT EXISTS(SELECT 1 FROM magazine_articles s WHERE s.user_id=?1 AND instr(s.html,media.id)>0)",params![OWNER,id.0])?;
     }
     tx.commit()?;
+    for id in ids {
+        remove_local_copy(c, id)?;
+    }
     Ok(count)
 }
 /// Archive every article matching `q` (e.g. one publication). Reversible, so
@@ -292,6 +302,9 @@ pub fn delete_matching(c: &mut Connection, q: &Query, expected: u32) -> Result<u
         tx.execute("DELETE FROM article_media AS media WHERE user_id=?1 AND article_id=?2 AND NOT EXISTS(SELECT 1 FROM magazine_articles s WHERE s.user_id=?1 AND instr(s.html,media.id)>0)",params![OWNER,id])?;
     }
     tx.commit()?;
+    for id in &ids {
+        remove_local_copy(c, &ArticleId(id.clone()))?;
+    }
     Ok(ids.len())
 }
 pub fn refetch_all(c: &mut Connection) -> Result<usize> {

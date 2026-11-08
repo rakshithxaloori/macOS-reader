@@ -7,6 +7,13 @@ version for fixes. Each release is a `vX.Y.Z` tag on `main`.
 
 ## [Unreleased]
 
+### Added
+- Save a local copy of an article from the reader toolbar so it stays readable
+  offline; it is never evicted and can be removed again.
+
+### Changed
+- The reader's text style and size controls sit behind an "Aa" button.
+
 ## [0.3.5] - 2026-11-05
 
 ### Added

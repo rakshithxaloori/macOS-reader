@@ -1905,6 +1905,88 @@ pub mod native {
         text.setTextContainerInset(NSSize::new(0.0, 0.0));
         configure_text_appearance(text, Appearance::Light);
     }
+    /// Space after a reader paragraph, in ems. Substack-like airy rhythm.
+    const PARAGRAPH_AFTER: f32 = 1.6;
+    /// Space above and below an image, in ems.
+    const IMAGE_AROUND: f32 = 1.4;
+    /// Space between an image and its caption, and between list items.
+    const TIGHT_AFTER: f32 = 0.6;
+    /// Tighten spacing inside groups that read as one unit: an image and the
+    /// caption under it, and consecutive items of one list. The group as a
+    /// whole keeps the full paragraph spacing after it.
+    fn reader_block_rhythm(rtf: &str, twips: impl Fn(f32) -> u32) -> String {
+        let image = format!(
+            "{{\\pard\\qc\\sb{}\\sa{} ",
+            twips(IMAGE_AROUND),
+            twips(IMAGE_AROUND)
+        );
+        let paragraph = format!("\\sa{} ", twips(PARAGRAPH_AFTER));
+        let tight = format!("\\sa{} ", twips(TIGHT_AFTER));
+        let caption = "\\f2\\fs26\\cf3";
+        let list_item = "\\fi-240 ";
+        let lines: Vec<&str> = rtf.split_inclusive('\n').collect();
+        let mut output = String::with_capacity(rtf.len() + 64);
+        for (index, line) in lines.iter().enumerate() {
+            let next = lines.get(index + 1).copied().unwrap_or_default();
+            if line.starts_with(&image) && next.starts_with("{\\pard") && next.contains(caption) {
+                output.push_str(&line.replacen(
+                    &image,
+                    &format!(
+                        "{{\\pard\\qc\\sb{}\\sa{} ",
+                        twips(IMAGE_AROUND),
+                        twips(TIGHT_AFTER)
+                    ),
+                    1,
+                ));
+            } else if line.starts_with("{\\pard")
+                && line.contains(list_item)
+                && next.starts_with("{\\pard")
+                && next.contains(list_item)
+            {
+                output.push_str(&line.replacen(&paragraph, &tight, 1));
+            } else {
+                output.push_str(line);
+            }
+        }
+        output
+    }
+    #[cfg(test)]
+    #[test]
+    fn reader_rhythm_tightens_captions_and_list_items_only_inside_groups() {
+        let twips = |ems: f32| (19.0 * ems * 20.0).round() as u32;
+        let image = format!(
+            "{{\\pard\\qc\\sb{0}\\sa{0} RLIMAGE\\par}}\n",
+            twips(IMAGE_AROUND)
+        );
+        let caption = format!(
+            "{{\\pard\\sa{} \\f2\\fs26\\cf3 Caption\\par}}\n",
+            twips(PARAGRAPH_AFTER)
+        );
+        let item = |text: &str| {
+            format!(
+                "{{\\pard\\sa{} \\li360\\fi-240 {text}\\par}}\n",
+                twips(PARAGRAPH_AFTER)
+            )
+        };
+        let body = format!("{{\\pard\\sa{} Body\\par}}\n", twips(PARAGRAPH_AFTER));
+        let input = [
+            image.clone(),
+            caption.clone(),
+            item("One"),
+            item("Two"),
+            body.clone(),
+            image.clone(),
+            body.clone(),
+        ]
+        .concat();
+        let output = reader_block_rhythm(&input, twips);
+        let lines: Vec<_> = output.lines().collect();
+        assert!(lines[0].contains(&format!("\\sa{} ", twips(TIGHT_AFTER))));
+        assert!(lines[2].contains(&format!("\\sa{} ", twips(TIGHT_AFTER))));
+        assert!(lines[3].contains(&format!("\\sa{} ", twips(PARAGRAPH_AFTER))));
+        assert_eq!(format!("{}\n", lines[5]), image);
+        assert_eq!(format!("{}\n", lines[1]), caption);
+    }
     /// The reader body's attributed text, with screen typography and native blocks.
     pub fn reader_document(
         document: &RichDocument,
@@ -1914,6 +1996,8 @@ pub mod native {
         appearance: Appearance,
     ) -> Result<Retained<NSAttributedString>, String> {
         let half_points = (body_size * 2.0).round() as u32;
+        // Vertical rhythm in ems of the body size, converted to RTF twips.
+        let twips = |ems: f32| (body_size * ems * 20.0).round() as u32;
         let mut rtf = String::from_utf8(themed_reader_rtf(
             document, images, body_size, font, appearance,
         )?)
@@ -1922,22 +2006,30 @@ pub mod native {
         .replace("\\sl444\\slmult1", "\\sl384\\slmult1")
         .replace(
             &format!("\\sa{}", half_points * 5),
-            &format!("\\sa{}", (body_size * 1.3 * 20.0).round() as u32),
+            &format!("\\sa{}", twips(PARAGRAPH_AFTER)),
         )
-        .replace("\\f2\\fs24\\cf3", "\\f2\\fs26\\cf3\\sl360\\slmult1\\sa160")
+        .replace(
+            "\\f2\\fs24\\cf3",
+            &format!(
+                "\\f2\\fs26\\cf3\\sl360\\slmult1\\sa{}",
+                twips(PARAGRAPH_AFTER)
+            ),
+        )
         // Quotes are set upright beside a native bar, as publishers style them.
         .replace("\\li360\\i ", "\\li360 ")
-        // Images otherwise butt against the following paragraph.
+        // Images get room above and below, as publishers like Substack set them.
         .replace(
             "{\\pard\\qc ",
             &format!(
-                "{{\\pard\\qc\\sa{} ",
-                (body_size * 0.8 * 20.0).round() as u32
+                "{{\\pard\\qc\\sb{}\\sa{} ",
+                twips(IMAGE_AROUND),
+                twips(IMAGE_AROUND)
             ),
         );
+        rtf = reader_block_rhythm(&rtf, twips);
         // Keep the heading hierarchy: a section heading (h3-h6) must not
         // match the size of a top-level one.
-        for (heading, scale, before) in [(64, 1.6, 1.5), (54, 1.35, 1.4), (46, 1.15, 1.25)] {
+        for (heading, scale, before) in [(64, 1.6, 2.1), (54, 1.35, 1.9), (46, 1.15, 1.7)] {
             rtf = rtf.replace(
                 &format!("\\b\\fs{heading}\\keepn"),
                 &format!(
@@ -2001,12 +2093,53 @@ pub mod native {
             }
             index = range.location + range.length.max(1);
         }
+        reader_image_paragraphs(&output);
         reader_text_blocks(
             &output,
             &super::rule_marker(&document.source_sha256),
             colors,
         );
         Ok(output.into_super())
+    }
+    /// Inserting an image attachment drops the paragraph style of its RTF
+    /// paragraph, so its centering and spacing were lost. Restore the style
+    /// from the paragraph's own line break. Reader only; magazine bytes keep
+    /// their established layout.
+    fn reader_image_paragraphs(output: &NSMutableAttributedString) {
+        let text = output.string();
+        let length = output.length();
+        let mut index = 0;
+        while index < length {
+            let mut range = NSRange::new(index, 1);
+            let attachment = unsafe {
+                output.attribute_atIndex_effectiveRange(
+                    NSAttachmentAttributeName,
+                    index,
+                    &mut range,
+                )
+            };
+            let end = range.location + range.length.max(1);
+            if attachment.is_some()
+                && end < length
+                && text.characterAtIndex(end) == u16::from(b'\n')
+                && let Some(style) = unsafe {
+                    output.attribute_atIndex_effectiveRange(
+                        NSParagraphStyleAttributeName,
+                        end,
+                        std::ptr::null_mut(),
+                    )
+                }
+            {
+                unsafe {
+                    output.addAttribute_value_range(
+                        NSParagraphStyleAttributeName,
+                        &style,
+                        NSRange::new(range.location, end - range.location),
+                    );
+                }
+            }
+            index = end;
+        }
     }
     /// Draw rules and quote bars as native text blocks; RTF import cannot express them.
     fn reader_text_blocks(
