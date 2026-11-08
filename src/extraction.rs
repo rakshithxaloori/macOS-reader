@@ -690,6 +690,137 @@ pub fn extract(body: &str, url: &str) -> Result<Extraction, String> {
         source_sha256,
     })
 }
+/// True for a PDF response: its declared type, or PDF bytes sent as a generic download.
+pub fn is_pdf(content_type: &str, body: &[u8]) -> bool {
+    content_type == "application/pdf" || body.starts_with(b"%PDF-")
+}
+/// Extract a fetched article response, either an HTML page or a PDF.
+pub fn extract_response(body: &[u8], content_type: &str, url: &str) -> Result<Extraction, String> {
+    if is_pdf(content_type, body) {
+        return extract_pdf(body, url);
+    }
+    let source = std::str::from_utf8(body).map_err(|_| "Publisher page must use UTF-8 encoding")?;
+    extract(source, url)
+}
+/// A saved PDF link becomes reflowed reader prose; the exact bytes stay with the
+/// cached copy for the PDF viewer.
+pub fn extract_pdf(bytes: &[u8], url: &str) -> Result<Extraction, String> {
+    pdf_extraction(
+        crate::native_pdf::article_text(bytes)?,
+        format!("{:x}", Sha256::digest(bytes)),
+        url,
+    )
+}
+fn pdf_extraction(
+    pdf: crate::native_pdf::PdfText,
+    source_sha256: String,
+    url: &str,
+) -> Result<Extraction, String> {
+    let page_url = Url::parse(url).map_err(|e| e.to_string())?;
+    let html = pdf_html(&pdf.pages);
+    let words = word_count(&html);
+    let file_name = page_url
+        .path_segments()
+        .and_then(|mut s| s.next_back())
+        .map(|name| {
+            let name = name.replace("%20", " ");
+            let name = name.trim();
+            name.strip_suffix(".pdf")
+                .or_else(|| name.strip_suffix(".PDF"))
+                .unwrap_or(name)
+                .to_owned()
+        })
+        .filter(|name| !name.is_empty());
+    let first_line = pdf
+        .pages
+        .iter()
+        .flat_map(|page| page.lines())
+        .map(normalized)
+        .find(|line| !line.is_empty())
+        .filter(|line| line.chars().count() <= 200);
+    let (html, status, error) = if words == 0 {
+        (
+            "<p>This PDF has no selectable text. Use Open PDF to view its pages.</p>".to_owned(),
+            CopyStatus::Partial,
+            Some("The PDF has no selectable text".to_owned()),
+        )
+    } else {
+        (html, CopyStatus::Saved, None)
+    };
+    Ok(Extraction {
+        title: pdf
+            .title
+            .or(first_line)
+            .or(file_name)
+            .unwrap_or_default()
+            .chars()
+            .take(1000)
+            .collect(),
+        author: pdf.author,
+        site: page_url.host_str().unwrap_or_default().to_owned(),
+        excerpt: text(&html).chars().take(260).collect(),
+        html,
+        word_count: words,
+        status,
+        error,
+        published_at: None,
+        logo_sources: Vec::new(),
+        source_sha256,
+    })
+}
+/// Reflow PDFKit's hard-wrapped lines into paragraphs. A paragraph ends at a
+/// blank line, at a page end, or at a clearly short line that ends a sentence.
+/// Lone page numbers are dropped and words hyphenated across lines are rejoined.
+fn pdf_html(pages: &[String]) -> String {
+    let mut out = String::new();
+    for page in pages {
+        let lines: Vec<String> = page.lines().map(normalized).collect();
+        let mut widths: Vec<usize> = lines
+            .iter()
+            .map(|l| l.chars().count())
+            .filter(|&n| n > 0)
+            .collect();
+        widths.sort_unstable();
+        let typical = widths.get(widths.len() * 4 / 5).copied().unwrap_or(0);
+        let mut paragraph = String::new();
+        let mut flush = |paragraph: &mut String| {
+            if !paragraph.is_empty() {
+                out.push_str("<p>");
+                out.push_str(&escape(paragraph));
+                out.push_str("</p>");
+                paragraph.clear();
+            }
+        };
+        for line in &lines {
+            if line.is_empty() {
+                flush(&mut paragraph);
+                continue;
+            }
+            if line.chars().all(|c| c.is_ascii_digit()) && line.len() <= 4 {
+                continue;
+            }
+            let hyphenated = paragraph.ends_with('-')
+                && paragraph
+                    .chars()
+                    .rev()
+                    .nth(1)
+                    .is_some_and(char::is_alphabetic)
+                && line.chars().next().is_some_and(char::is_lowercase);
+            if hyphenated {
+                paragraph.pop();
+            } else if !paragraph.is_empty() {
+                paragraph.push(' ');
+            }
+            paragraph.push_str(line);
+            let short = line.chars().count() * 4 < typical * 3;
+            if short && line.ends_with(['.', '?', '!', ':', '"', '\u{201d}']) {
+                flush(&mut paragraph);
+            }
+        }
+        flush(&mut paragraph);
+    }
+    out
+}
 /// Require all incoming semantic text blocks, in order. A shared ending or word
 /// count cannot verify a retained copy. Tables and footnotes participate equally.
 pub fn contains_reading_copy(retained_html: &str, complete_html: &str) -> bool {
@@ -781,6 +912,48 @@ pub fn retention_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pdf_text_reflows_into_paragraphs_with_metadata_fallbacks() {
+        let line = "a line of body text that runs to the usual width of the column here";
+        let page = format!(
+            "Paper Title\n\n{line}\n{line} with a hyphen-\nated word\nends here.\n{line}\n{line}\n7\n"
+        );
+        let pdf = crate::native_pdf::PdfText {
+            title: None,
+            author: Some("A. Writer".into()),
+            pages: vec![page, "Second page.".into()],
+        };
+        let copy = pdf_extraction(
+            pdf,
+            "0".repeat(64),
+            "https://example.org/files/My%20Paper.pdf",
+        )
+        .unwrap();
+        assert_eq!(copy.title, "Paper Title");
+        assert_eq!(copy.site, "example.org");
+        assert_eq!(copy.author.as_deref(), Some("A. Writer"));
+        assert_eq!(copy.status, CopyStatus::Saved);
+        let paragraphs: Vec<&str> = copy.html.split("<p>").skip(1).collect();
+        assert_eq!(paragraphs.len(), 4, "{}", copy.html);
+        assert!(paragraphs[1].contains("hyphenated word ends here.</p>"));
+        assert!(!copy.html.contains(">7<") && !copy.html.contains(" 7</p>"));
+        assert_eq!(paragraphs[3], "Second page.</p>");
+        let scanned = crate::native_pdf::PdfText {
+            pages: vec![" \n".into()],
+            ..Default::default()
+        };
+        let copy = pdf_extraction(
+            scanned,
+            "0".repeat(64),
+            "https://example.org/files/My%20Paper.pdf",
+        )
+        .unwrap();
+        assert_eq!(copy.title, "My Paper");
+        assert_eq!(copy.word_count, 0);
+        assert_eq!(copy.status, CopyStatus::Partial);
+        assert!(is_pdf("application/octet-stream", b"%PDF-1.7"));
+        assert!(!is_pdf("text/html", b"<html>"));
+    }
     #[test]
     fn headings_rules_and_embeds_survive_readability() {
         let prose =

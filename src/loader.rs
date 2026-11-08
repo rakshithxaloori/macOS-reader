@@ -8,7 +8,7 @@ use crate::{
     library,
     storage::{CachedArticle, CachedMedia, Storage},
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use scraper::{ElementRef, Html, Selector};
 use std::{
     cell::Cell,
@@ -125,10 +125,25 @@ pub async fn acquire(
     on_text: impl Fn(&extraction::Extraction),
 ) -> Result<Acquired> {
     let resource = fetcher.fetch(url, false).await?;
-    let source =
-        std::str::from_utf8(&resource.body).context("Publisher page must use UTF-8 encoding")?;
-    let mut copy =
-        extraction::extract(source, resource.url.as_str()).map_err(anyhow::Error::msg)?;
+    let mut copy = extraction::extract_response(
+        &resource.body,
+        &resource.content_type,
+        resource.url.as_str(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    if extraction::is_pdf(&resource.content_type, &resource.body) {
+        // The exact PDF travels with its prose so the viewer can show its pages.
+        on_text(&copy);
+        return Ok(Acquired {
+            copy,
+            media: vec![CachedMedia {
+                id: uuid::Uuid::new_v4().to_string(),
+                mime_type: "application/pdf".into(),
+                bytes: resource.body,
+            }],
+            fetched_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
     ensure!(
         copy.word_count > 0,
         "Publisher did not provide a readable article"
@@ -883,6 +898,65 @@ mod tests {
                 content_type: if image { "image/png" } else { "text/html" }.into(),
             })
         }
+    }
+    /// A one-page PDF whose text PDFKit can read, served as a generic download.
+    struct PdfLink;
+    #[async_trait::async_trait(?Send)]
+    impl Fetcher for PdfLink {
+        async fn fetch(&self, url: &str, image: bool) -> Result<network::Resource> {
+            assert!(!image, "a PDF link fetches no images");
+            let stream = b"BT /F1 12 Tf 72 700 Td (Readers keep PDF prose.) Tj ET";
+            let objects = [
+                "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+                "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_owned(),
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_owned(),
+                format!("<< /Length {} >>\nstream\n{}\nendstream", stream.len(), String::from_utf8_lossy(stream)),
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+            ];
+            let mut pdf = b"%PDF-1.4\n".to_vec();
+            let mut offsets = Vec::new();
+            for (index, object) in objects.iter().enumerate() {
+                offsets.push(pdf.len());
+                pdf.extend_from_slice(
+                    format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes(),
+                );
+            }
+            let xref = pdf.len();
+            pdf.extend_from_slice(
+                format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
+            );
+            for offset in offsets {
+                pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+            }
+            pdf.extend_from_slice(
+                format!(
+                    "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                    objects.len() + 1
+                )
+                .as_bytes(),
+            );
+            Ok(network::Resource {
+                url: url::Url::parse(url)?,
+                body: pdf,
+                content_type: "application/pdf".into(),
+            })
+        }
+    }
+    #[tokio::test]
+    async fn pdf_link_yields_prose_and_keeps_its_exact_bytes() {
+        let copy = acquire(&PdfLink, "https://example.com/papers/note.pdf", |_| {})
+            .await
+            .unwrap();
+        assert!(
+            copy.copy.html.contains("Readers keep PDF prose."),
+            "{}",
+            copy.copy.html
+        );
+        assert_eq!(copy.copy.title, "Readers keep PDF prose.");
+        assert_eq!(copy.copy.status, CopyStatus::Saved);
+        assert_eq!(copy.media.len(), 1);
+        assert_eq!(copy.media[0].mime_type, "application/pdf");
+        assert!(copy.media[0].bytes.starts_with(b"%PDF-"));
     }
     #[tokio::test]
     async fn prose_precedes_images_and_native_structures_survive() {

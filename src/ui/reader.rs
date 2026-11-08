@@ -16,6 +16,7 @@ pub struct ReaderView<'a> {
     pub loading: bool,
     pub error: Option<&'a str>,
     pub has_copy: bool,
+    pub pdf: bool,
     pub fetched_at: Option<&'a str>,
     pub native: bool,
 }
@@ -38,6 +39,7 @@ pub fn draw(ui: &mut Ui, view: ReaderView<'_>, actions: &mut Vec<Action>) -> Rea
         loading,
         error,
         has_copy,
+        pdf,
         fetched_at,
         native,
     } = view;
@@ -56,6 +58,9 @@ pub fn draw(ui: &mut Ui, view: ReaderView<'_>, actions: &mut Vec<Action>) -> Rea
                         if let Some(a) = article {
                             if controls::toolbar_button(ui, Icon::External, "Open original article", false).clicked() {
                                 ui.ctx().open_url(egui::OpenUrl::new_tab(&a.url));
+                            }
+                            if pdf && controls::toolbar_button(ui, Icon::Book, "Open PDF", false).clicked() {
+                                actions.push(Action::OpenArticlePdf);
                             }
                             if controls::toolbar_button(ui, Icon::Trash, "Delete article", false).clicked() {
                                 actions.push(Action::ConfirmDelete(vec![a.id.clone()]));

@@ -6,6 +6,8 @@ use std::{
 use url::Url;
 
 pub const MAX_RESPONSE: usize = 5 * 1024 * 1024;
+/// A saved PDF link is kept whole in the article cache, so it must fit there.
+pub const MAX_PDF: usize = 15 * 1024 * 1024;
 pub fn public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(a) => {
@@ -72,7 +74,7 @@ pub struct ConditionalResource {
 pub async fn fetch(input: &str, image: bool) -> Result<Resource> {
     tokio::time::timeout(
         Duration::from_secs(if image { 8 } else { 25 }),
-        fetch_inner(input, image, None, None, MAX_RESPONSE),
+        fetch_inner(input, image, !image, None, None, MAX_RESPONSE),
     )
     .await
     .map_err(|_| anyhow::anyhow!("Download timed out"))??
@@ -82,7 +84,7 @@ pub async fn fetch(input: &str, image: bool) -> Result<Resource> {
 pub async fn fetch_icon(input: &str) -> Result<Resource> {
     tokio::time::timeout(
         Duration::from_secs(8),
-        fetch_inner(input, true, None, None, 256 * 1024),
+        fetch_inner(input, true, false, None, None, 256 * 1024),
     )
     .await
     .map_err(|_| anyhow::anyhow!("Icon download timed out"))??
@@ -102,7 +104,7 @@ pub async fn fetch_conditional(
     }
     tokio::time::timeout(
         Duration::from_secs(25),
-        fetch_inner(input, false, etag, last_modified, MAX_RESPONSE),
+        fetch_inner(input, false, false, etag, last_modified, MAX_RESPONSE),
     )
     .await
     .map_err(|_| anyhow::anyhow!("Download timed out"))?
@@ -110,6 +112,7 @@ pub async fn fetch_conditional(
 async fn fetch_inner(
     input: &str,
     image: bool,
+    pdf_allowed: bool,
     etag: Option<&str>,
     last_modified: Option<&str>,
     max_bytes: usize,
@@ -138,7 +141,7 @@ async fn fetch_inner(
             .timeout(Duration::from_secs(25))
             .resolve(&host, addresses[0])
             .build()?;
-        let mut request=client.get(url.clone()).header("User-Agent","ReadLater/0.2 (+private article reader)").header("Accept",if image{"image/png,image/jpeg,image/webp,image/gif,image/x-icon,image/vnd.microsoft.icon"}else{"text/html,application/rss+xml,application/atom+xml,application/xml,text/xml,text/plain"}).header("Accept-Encoding","identity");
+        let mut request=client.get(url.clone()).header("User-Agent","ReadLater/0.2 (+private article reader)").header("Accept",if image{"image/png,image/jpeg,image/webp,image/gif,image/x-icon,image/vnd.microsoft.icon"}else{"text/html,application/rss+xml,application/atom+xml,application/xml,text/xml,text/plain,application/pdf"}).header("Accept-Encoding","identity");
         if redirect == 0 {
             if let Some(value) = etag {
                 request = request.header("If-None-Match", value);
@@ -206,14 +209,25 @@ async fn fetch_inner(
                 ),
                 "Unsupported raster image format"
             );
+        }
+        // PDFs are accepted by declared type, or by their bytes when a server
+        // sends them as a generic download. Feeds and images never accept them.
+        let generic = matches!(
+            content_type.as_str(),
+            "application/octet-stream" | "binary/octet-stream" | "application/x-pdf"
+        );
+        let max_bytes = if pdf_allowed && (content_type == "application/pdf" || generic) {
+            max_bytes.max(MAX_PDF)
         } else {
             ensure!(
-                content_type.contains("html")
+                image
+                    || content_type.contains("html")
                     || content_type.contains("xml")
                     || content_type == "text/plain",
-                "URL is not an HTML page or feed"
+                "URL is not an HTML page, PDF or feed"
             );
-        }
+            max_bytes
+        };
         ensure!(
             response
                 .content_length()
@@ -228,11 +242,21 @@ async fn fetch_inner(
             );
             body.extend_from_slice(&chunk);
         }
+        if generic || content_type == "application/pdf" {
+            ensure!(
+                body.starts_with(b"%PDF-"),
+                "URL is not an HTML page, PDF or feed"
+            );
+        }
         return Ok(ConditionalResource {
             resource: Some(Resource {
                 url,
                 body,
-                content_type,
+                content_type: if generic {
+                    "application/pdf".into()
+                } else {
+                    content_type
+                },
             }),
             etag: response_etag,
             last_modified: response_modified,

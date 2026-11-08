@@ -37,6 +37,7 @@ pub enum Action {
     Navigate(View),
     Open(ArticleId),
     CloseReader,
+    OpenArticlePdf,
     Query(Query),
     LoadMore,
     Command(Command),

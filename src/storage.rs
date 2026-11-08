@@ -25,6 +25,14 @@ use std::{
 /// The app bundle must stay strictly below this size.
 pub const APP_BUNDLE_LIMIT_BYTES: u64 = 50_000_000;
 pub const CACHE_BYTES: u64 = 20_000_000;
+/// Images stay below 5 MB; a saved PDF link keeps its exact bytes.
+fn media_limit(mime_type: &str) -> u64 {
+    if mime_type == "application/pdf" {
+        crate::network::MAX_PDF as u64
+    } else {
+        5_242_880
+    }
+}
 pub const DEFAULT_BUNDLE_BYTES: u64 = 45_000_000;
 const INDEX_LIMIT: u64 = 2_000_000;
 const TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
@@ -125,7 +133,7 @@ fn read_cached(directory: &Path) -> Result<CachedArticle> {
         let path = directory.join(value.path);
         ensure!(
             fs::symlink_metadata(&path)?.file_type().is_file()
-                && fs::metadata(&path)?.len() <= 5_242_880,
+                && fs::metadata(&path)?.len() <= media_limit(&value.mime_type),
             "Invalid cached image"
         );
         read_bytes = read_bytes.saturating_add(fs::metadata(&path)?.len());
@@ -620,7 +628,10 @@ impl Storage {
         };
         let mut bytes = 0u64;
         for (number, media) in article.media.iter().enumerate() {
-            ensure!(media.bytes.len() <= 5_242_880, "Cached image exceeds 5 MB");
+            ensure!(
+                media.bytes.len() as u64 <= media_limit(&media.mime_type),
+                "Cached media exceeds its size limit"
+            );
             bytes = bytes
                 .checked_add(media.bytes.len() as u64)
                 .context("Cache bytes overflow")?;

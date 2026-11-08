@@ -815,6 +815,19 @@ impl App {
                 }
             }
             Action::Open(id) => self.open(id),
+            Action::OpenArticlePdf => {
+                if let Some(body) = &self.selected
+                    && let Some(bytes) = body.pdf()
+                {
+                    match PdfWindow::open(bytes, &format!("{} · Reader", body.article.title)) {
+                        Ok(window) => {
+                            window.set_appearance(self.settings.appearance);
+                            self.pdfs.push(window);
+                        }
+                        Err(error) => self.error = error,
+                    }
+                }
+            }
             Action::CloseReader => {
                 self.body_generation += 1;
                 self.selected = None;
@@ -1507,6 +1520,10 @@ impl eframe::App for App {
                                 .selected
                                 .as_ref()
                                 .is_some_and(|body| !body.html.trim().is_empty()),
+                            pdf: self
+                                .selected
+                                .as_ref()
+                                .is_some_and(|body| body.pdf().is_some()),
                             native: self.native_reader.is_some(),
                         },
                         &mut actions,

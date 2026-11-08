@@ -7,6 +7,13 @@ version for fixes. Each release is a `vX.Y.Z` tag on `main`.
 
 ## [Unreleased]
 
+### Added
+- Links to PDFs can be saved, from the app or from WhatsApp "save" messages.
+  The reader shows the PDF's text as reflowed prose (title, author, reading
+  time and search come from it), and the toolbar's book button opens the exact
+  PDF pages in the PDF viewer. PDFs up to 15 MB are kept in the article cache;
+  a PDF with no selectable text shows a notice and still opens in the viewer.
+
 ## [0.3.5] - 2026-11-05
 
 ### Added
