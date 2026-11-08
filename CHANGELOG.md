@@ -7,6 +7,11 @@ version for fixes. Each release is a `vX.Y.Z` tag on `main`.
 
 ## [Unreleased]
 
+### Fixed
+- Links on WordPress.com and other IPv4-only sites no longer fail with "URL
+  resolves to a private network" on networks that use DNS64/NAT64. Synthesized
+  `64:ff9b::/96` addresses are judged by the IPv4 address they embed.
+
 ## [0.3.5] - 2026-11-05
 
 ### Added
