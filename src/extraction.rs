@@ -348,12 +348,22 @@ pub fn word_count(html: &str) -> u32 {
         .unwrap_or(u32::MAX)
 }
 
-/// Media players and social cards cannot run natively. Replace them with honest
-/// static equivalents: a link to watch the video, or the post's published text.
+/// Publisher players and social cards are not kept. Replace them with static
+/// equivalents: a video caption link (the native reader plays recognized ones,
+/// see `rich_content::video_player`), or the post's published text.
 fn embed_html(node: ElementRef<'_>, page_url: &Url) -> Option<String> {
     let element = node.value();
     let video = match element.name() {
-        "video" => Some(page_url.to_string()),
+        // Keep a direct file so the reader can play it; otherwise link the page.
+        "video" => Some(
+            std::iter::once(node)
+                .chain(node.descendants().filter_map(ElementRef::wrap))
+                .filter(|e| matches!(e.value().name(), "video" | "source"))
+                .filter_map(|e| page_url.join(e.value().attr("src")?).ok())
+                .find(|u| matches!(u.scheme(), "http" | "https"))
+                .unwrap_or_else(|| page_url.clone())
+                .to_string(),
+        ),
         "iframe" => {
             let source = element.attr("src").and_then(|s| page_url.join(s).ok())?;
             let host = source.host_str().unwrap_or_default();
@@ -380,6 +390,8 @@ fn embed_html(node: ElementRef<'_>, page_url: &Url) -> Option<String> {
             "Watch on YouTube"
         } else if link.contains("vimeo.com") {
             "Watch on Vimeo"
+        } else if crate::rich_content::video_player(&link).is_some() {
+            "Watch the video"
         } else {
             "Watch on the original page"
         };
@@ -794,6 +806,8 @@ mod tests {
              <p>{prose}</p>\
              <a href=\"https://x.com/someone/status/1\" data-component-name=\"Twitter2ToDOM\"><div class=\"twitter-embed\" data-attrs=\"{}\"><img src=\"https://example.org/avatar.jpg\"><p>Some One@someone</p></div></a>\
              <iframe src=\"https://www.youtube-nocookie.com/embed/abc123?rel=0\"></iframe>\
+             <p>{prose}</p>\
+             <video poster=\"p.jpg\"><source src=\"/media/clip.mp4\" type=\"video/mp4\"></video>\
              <p>{prose}</p></article></body></html>",
             escape(tweet)
         );
@@ -810,6 +824,10 @@ mod tests {
         );
         assert!(
             out.contains("<a href=\"https://www.youtube.com/watch?v=abc123\""),
+            "{out}"
+        );
+        assert!(
+            out.contains("<a href=\"https://example.org/media/clip.mp4\""),
             "{out}"
         );
         assert!(

@@ -51,6 +51,7 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSAttributedString", "NSData", "NSString", "NSThread"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSView", "NSMenu", "NSMenuItem"] }
 objc2-pdf-kit = "0.3"
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKNavigation", "WKPreferences", "WKWebView", "WKWebViewConfiguration"] }
 security-framework = "3"
 
 [dev-dependencies]
