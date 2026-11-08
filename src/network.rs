@@ -28,6 +28,12 @@ pub fn public_ip(ip: IpAddr) -> bool {
             if let Some(v4) = a.to_ipv4_mapped() {
                 return public_ip(IpAddr::V4(v4));
             }
+            // DNS64/NAT64 networks synthesize 64:ff9b::/96 addresses for
+            // IPv4-only hosts (e.g. WordPress.com); judge the embedded IPv4.
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [a, b] = [s[6].to_be_bytes(), s[7].to_be_bytes()];
+                return public_ip(IpAddr::V4([a[0], a[1], b[0], b[1]].into()));
+            }
             (s[0] & 0xe000) == 0x2000 && !(s[0] == 0x2001 && (s[1] == 0xdb8 || s[1] < 0x200))
         }
     }
@@ -267,7 +273,13 @@ mod tests {
         for ip in ["192.0.78.12", "192.0.1.1", "192.2.0.1"] {
             assert!(public_ip(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["192.0.0.9", "192.0.2.1", "::ffff:192.0.2.1"] {
+        assert!(public_ip("64:ff9b::c000:4e0c".parse().unwrap())); // NAT64 192.0.78.12
+        for ip in [
+            "192.0.0.9",
+            "192.0.2.1",
+            "::ffff:192.0.2.1",
+            "64:ff9b::a00:1",
+        ] {
             assert!(!public_ip(ip.parse().unwrap()), "{ip}");
         }
     }
