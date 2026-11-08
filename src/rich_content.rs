@@ -2013,6 +2013,15 @@ pub mod native {
             #[unsafe(method(hitTest:))]fn hit_test(&self,_point:NSPoint)->*mut NSView{std::ptr::null_mut()}
         }
     );
+    define_class!(
+        // The player has nothing to scroll; wheel events scroll the article, even
+        // when the pointer rests on the video.
+        #[unsafe(super(objc2_web_kit::WKWebView, NSView))] #[thread_kind=MainThreadOnly] #[name="ReadingListReaderVideoView"]
+        struct VideoView;
+        impl VideoView{
+            #[unsafe(method(scrollWheel:))]fn scroll_wheel(&self,event:&objc2_app_kit::NSEvent){if let Some(scroll)=self.enclosingScrollView(){scroll.scrollWheel(event);}}
+        }
+    );
     const VIDEO_WIDTH: f64 = 780.0;
     /// Players load with this origin as their referrer; YouTube refuses an empty one.
     const VIDEO_ORIGIN: &str = "https://reader.rakshithxaloori.com/";
@@ -2070,11 +2079,13 @@ pub mod native {
             let start = output.string().paragraphRangeForRange(range).location;
             let attributes =
                 unsafe { output.attributesAtIndex_effectiveRange(start, std::ptr::null_mut()) };
-            let placeholder = NSMutableAttributedString::initWithString_attributes(
-                NSMutableAttributedString::alloc(),
-                &NSString::from_str("\u{fffc}\u{2028}"),
-                Some(&attributes),
-            );
+            let placeholder = unsafe {
+                NSMutableAttributedString::initWithString_attributes(
+                    NSMutableAttributedString::alloc(),
+                    &NSString::from_str("\u{fffc}\u{2028}"),
+                    Some(&attributes),
+                )
+            };
             let size = NSSize::new(VIDEO_WIDTH, VIDEO_WIDTH * 9.0 / 16.0);
             let attachment = NSTextAttachment::new();
             // An empty image of the player size keeps the full size for resizing.
@@ -2101,12 +2112,8 @@ pub mod native {
                         .preferences()
                         .setElementFullscreenEnabled(true)
                 };
-                let web = unsafe {
-                    objc2_web_kit::WKWebView::initWithFrame_configuration(
-                        objc2_web_kit::WKWebView::alloc(mtm),
-                        attachment.bounds(),
-                        &configuration,
-                    )
+                let web: Retained<VideoView> = unsafe {
+                    msg_send![VideoView::alloc(mtm), initWithFrame: attachment.bounds(), configuration: &*configuration]
                 };
                 if let Some(page) = super::video_player(&href) {
                     unsafe {
@@ -2116,7 +2123,7 @@ pub mod native {
                         )
                     };
                 }
-                web.into_super()
+                web.into_super().into_super()
             });
             media.push(Media {
                 key,
