@@ -63,6 +63,8 @@ pub enum Block {
 pub struct RichDocument {
     pub image_layouts: HashMap<String, String>,
     pub image_links: HashMap<String, String>,
+    /// Caption links of image-free figures that `video_player` can play.
+    pub videos: Vec<String>,
     pub blocks: Vec<Block>,
     /// Digest of the original saved bytes, never of a flattened presentation.
     pub source_sha256: String,
@@ -91,9 +93,22 @@ impl RichDocument {
                 Some((source.to_owned(), parent.value().attr("href")?.to_owned()))
             })
             .collect();
+        let videos = html
+            .select(&selector("figure > figcaption a[href]"))
+            .filter(|link| {
+                link.ancestors()
+                    .filter_map(ElementRef::wrap)
+                    .find(|e| e.value().name() == "figure")
+                    .is_some_and(|figure| figure.select(&selector("img")).next().is_none())
+            })
+            .filter_map(|link| link.value().attr("href"))
+            .filter(|href| video_player(href).is_some())
+            .map(str::to_owned)
+            .collect();
         Self {
             image_layouts,
             image_links,
+            videos,
             blocks,
             source_sha256: format!("{:x}", Sha256::digest(saved_html.as_bytes())),
         }
@@ -124,6 +139,65 @@ impl RichDocument {
         collect(&self.blocks, &mut out);
         out
     }
+}
+/// The page the native reader loads in place of a saved video link: a YouTube
+/// or Vimeo player, or a plain HTML5 player for a direct video file. Links to
+/// anything else stay links.
+pub fn video_player(href: &str) -> Option<String> {
+    let url = url::Url::parse(href).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url
+        .host_str()?
+        .trim_start_matches("www.")
+        .trim_start_matches("m.");
+    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let id = |value: &str| {
+        (!value.is_empty()
+            && value.len() <= 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+        .then(|| value.to_owned())
+    };
+    let frame = match (host, segments.as_slice()) {
+        ("youtube.com" | "youtube-nocookie.com", ["watch"]) => url
+            .query_pairs()
+            .find(|(k, _)| k == "v")
+            .and_then(|(_, v)| id(&v))
+            .map(|v| format!("https://www.youtube-nocookie.com/embed/{v}")),
+        ("youtube.com" | "youtube-nocookie.com", ["embed" | "shorts" | "live", v])
+        | ("youtu.be", [v]) => id(v).map(|v| format!("https://www.youtube-nocookie.com/embed/{v}")),
+        ("vimeo.com", [v]) | ("player.vimeo.com", ["video", v])
+            if v.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            Some(format!("https://player.vimeo.com/video/{v}"))
+        }
+        _ => None,
+    };
+    let body = if let Some(frame) = frame {
+        format!(
+            "<iframe src=\"{frame}\" allow=\"autoplay; encrypted-media; fullscreen; picture-in-picture\" allowfullscreen></iframe>"
+        )
+    } else {
+        let file = segments.last()?.to_ascii_lowercase();
+        if ![".mp4", ".m4v", ".mov", ".webm"]
+            .iter()
+            .any(|ext| file.ends_with(ext))
+        {
+            return None;
+        }
+        let source = url
+            .as_str()
+            .replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('<', "&lt;");
+        format!("<video src=\"{source}\" controls playsinline preload=\"metadata\"></video>")
+    };
+    Some(format!(
+        "<!doctype html><meta name=\"referrer\" content=\"strict-origin\"><style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}iframe,video{{border:0;width:100%;height:100%;display:block}}</style>{body}"
+    ))
 }
 fn selector(css: &str) -> Selector {
     Selector::parse(css).expect("static selector")
@@ -859,6 +933,36 @@ mod tests {
             document.image_links.get("/api/media/x").map(String::as_str),
             Some("https://example.org/full")
         );
+    }
+    #[test]
+    fn only_recognized_video_captions_become_players() {
+        let document = RichDocument::parse(
+            "<p><a href='https://www.youtube.com/watch?v=prose1'>prose link</a></p>\
+             <figure><figcaption>Video · <a href='https://www.youtube.com/watch?v=abc_12-3'>Watch on YouTube</a></figcaption></figure>\
+             <figure><figcaption>Video · <a href='https://example.org/post'>Watch on the original page</a></figcaption></figure>\
+             <figure><img src='/api/media/x'><figcaption><a href='https://vimeo.com/42'>Credit</a></figcaption></figure>\
+             <figure><figcaption>Video · <a href='https://example.org/a.MP4?x=1&y=2'>Watch the video</a></figcaption></figure>",
+        );
+        assert_eq!(
+            document.videos,
+            vec![
+                "https://www.youtube.com/watch?v=abc_12-3",
+                "https://example.org/a.MP4?x=1&y=2"
+            ]
+        );
+        let player = |href| video_player(href).unwrap_or_default();
+        assert!(player("https://youtu.be/abc").contains("youtube-nocookie.com/embed/abc\""));
+        assert!(player("https://m.youtube.com/shorts/xyz").contains("/embed/xyz\""));
+        assert!(player("https://vimeo.com/42").contains("player.vimeo.com/video/42\""));
+        assert!(player("https://example.org/a.mp4?x=1&y=2").contains("a.mp4?x=1&amp;y=2\""));
+        for rejected in [
+            "https://www.youtube.com/watch?v=a\"b",
+            "https://vimeo.com/channel",
+            "https://example.org/post",
+            "javascript:alert(1)//x.mp4",
+        ] {
+            assert!(video_player(rejected).is_none(), "{rejected}");
+        }
     }
     #[test]
     fn linked_cached_images_keep_their_layout() {
@@ -1894,6 +1998,179 @@ pub mod native {
             #[unsafe(method(drawRect:))]fn draw_rect(&self,_dirty:NSRect){let colors=self.ivars().appearance.get().palette();native_color(colors.reader).setFill();objc2_app_kit::NSRectFill(self.bounds());let y=self.ivars().divider.get();if y>0.0{native_color(colors.divider).setFill();let inset=self.ivars().inset.get();objc2_app_kit::NSRectFill(NSRect::new(NSPoint::new(inset,y),NSSize::new((self.bounds().size.width-inset*2.0).max(1.0),1.0)));}}
         }
     );
+    /// Animated GIFs stay still inside TextKit attachments, and video cannot run
+    /// there at all. Native views are laid over their attachments instead.
+    struct Media {
+        key: String,
+        attachment: Retained<NSTextAttachment>,
+        view: Retained<NSView>,
+    }
+    define_class!(
+        // Clicks pass through to the text view, so linked images stay links.
+        #[unsafe(super(objc2_app_kit::NSImageView, objc2_app_kit::NSControl, NSView))] #[thread_kind=MainThreadOnly] #[name="ReadingListReaderAnimatedImage"]
+        struct AnimatedImageView;
+        impl AnimatedImageView{
+            #[unsafe(method(hitTest:))]fn hit_test(&self,_point:NSPoint)->*mut NSView{std::ptr::null_mut()}
+        }
+    );
+    const VIDEO_WIDTH: f64 = 780.0;
+    /// Players load with this origin as their referrer; YouTube refuses an empty one.
+    const VIDEO_ORIGIN: &str = "https://reader.rakshithxaloori.com/";
+    fn animated(image: &NSImage) -> bool {
+        image.representations().iter().any(|rep| {
+            rep.downcast_ref::<objc2_app_kit::NSBitmapImageRep>()
+                .and_then(|bitmap| {
+                    bitmap.valueForProperty(unsafe { objc2_app_kit::NSImageFrameCount })
+                })
+                .and_then(|count| count.downcast::<objc2_foundation::NSNumber>().ok())
+                .is_some_and(|count| count.integerValue() > 1)
+        })
+    }
+    fn link_href(value: &AnyObject) -> Option<String> {
+        value
+            .downcast_ref::<NSURL>()
+            .and_then(|url| url.absoluteString())
+            .map(|url| url.to_string())
+            .or_else(|| {
+                value
+                    .downcast_ref::<NSString>()
+                    .map(|href| href.to_string())
+            })
+    }
+    /// Put a 16:9 attachment at the start of each playable video caption and
+    /// pair every animated or video attachment with its native view. Views of
+    /// the previous copy of the same document are reused, so a font or theme
+    /// change does not restart playback.
+    fn media_overlays(
+        attributed: &NSAttributedString,
+        videos: &[String],
+        mut previous: HashMap<String, Retained<NSView>>,
+    ) -> (Retained<NSAttributedString>, Vec<Media>) {
+        let mtm = MainThreadMarker::new().expect("reader media is built on the main thread");
+        let output = NSMutableAttributedString::initWithAttributedString(
+            NSMutableAttributedString::alloc(),
+            attributed,
+        );
+        let mut links = Vec::new();
+        let mut index = 0;
+        while index < output.length() {
+            let mut range = NSRange::new(index, 1);
+            if let Some(value) = unsafe {
+                output.attribute_atIndex_effectiveRange(NSLinkAttributeName, index, &mut range)
+            } && let Some(href) = link_href(&value)
+                && videos.contains(&href)
+            {
+                links.push((range, href));
+            }
+            index = range.location + range.length.max(1);
+        }
+        let mut players = Vec::new();
+        // Insert from the end so earlier ranges stay valid.
+        for (range, href) in links.into_iter().rev() {
+            let start = output.string().paragraphRangeForRange(range).location;
+            let attributes =
+                unsafe { output.attributesAtIndex_effectiveRange(start, std::ptr::null_mut()) };
+            let placeholder = NSMutableAttributedString::initWithString_attributes(
+                NSMutableAttributedString::alloc(),
+                &NSString::from_str("\u{fffc}\u{2028}"),
+                Some(&attributes),
+            );
+            let size = NSSize::new(VIDEO_WIDTH, VIDEO_WIDTH * 9.0 / 16.0);
+            let attachment = NSTextAttachment::new();
+            // An empty image of the player size keeps the full size for resizing.
+            attachment.setImage(Some(&NSImage::initWithSize(NSImage::alloc(), size)));
+            attachment.setBounds(NSRect::new(NSPoint::new(0.0, 0.0), size));
+            unsafe {
+                placeholder.removeAttribute_range(NSLinkAttributeName, NSRange::new(0, 2));
+                placeholder.addAttribute_value_range(
+                    NSAttachmentAttributeName,
+                    &attachment,
+                    NSRange::new(0, 1),
+                );
+            }
+            output.insertAttributedString_atIndex(&placeholder, start);
+            players.push((href, attachment));
+        }
+        let mut media = Vec::new();
+        for (ordinal, (href, attachment)) in players.into_iter().rev().enumerate() {
+            let key = format!("video:{ordinal}:{href}");
+            let view = previous.remove(&key).unwrap_or_else(|| {
+                let configuration = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
+                unsafe {
+                    configuration
+                        .preferences()
+                        .setElementFullscreenEnabled(true)
+                };
+                let web = unsafe {
+                    objc2_web_kit::WKWebView::initWithFrame_configuration(
+                        objc2_web_kit::WKWebView::alloc(mtm),
+                        attachment.bounds(),
+                        &configuration,
+                    )
+                };
+                if let Some(page) = super::video_player(&href) {
+                    unsafe {
+                        web.loadHTMLString_baseURL(
+                            &NSString::from_str(&page),
+                            NSURL::URLWithString(&NSString::from_str(VIDEO_ORIGIN)).as_deref(),
+                        )
+                    };
+                }
+                web.into_super()
+            });
+            media.push(Media {
+                key,
+                attachment,
+                view,
+            });
+        }
+        let gifs = attachments(&output)
+            .into_iter()
+            .map(|(_, attachment)| attachment)
+            .filter(|attachment| attachment.image().is_some_and(|image| animated(&image)));
+        for (ordinal, attachment) in gifs.enumerate() {
+            let key = format!("gif:{ordinal}");
+            let view = previous.remove(&key).unwrap_or_else(|| {
+                let view: Retained<AnimatedImageView> = unsafe {
+                    msg_send![AnimatedImageView::alloc(mtm), initWithFrame: attachment.bounds()]
+                };
+                view.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
+                view.setAnimates(true);
+                view.into_super().into_super().into_super()
+            });
+            if let Some(image_view) = view.downcast_ref::<objc2_app_kit::NSImageView>() {
+                image_view.setImage(attachment.image().as_deref());
+            }
+            media.push(Media {
+                key,
+                attachment,
+                view,
+            });
+        }
+        for view in previous.into_values() {
+            view.removeFromSuperview();
+        }
+        (output.into_super(), media)
+    }
+    fn attachments(text: &NSAttributedString) -> Vec<(usize, Retained<NSTextAttachment>)> {
+        text.string()
+            .to_string()
+            .encode_utf16()
+            .enumerate()
+            .filter(|(_, unit)| *unit == 0xfffc)
+            .filter_map(|(index, _)| {
+                unsafe {
+                    text.attribute_atIndex_effectiveRange(
+                        NSAttachmentAttributeName,
+                        index,
+                        std::ptr::null_mut(),
+                    )
+                }
+                .and_then(|object| object.downcast::<NSTextAttachment>().ok())
+                .map(|attachment| (index, attachment))
+            })
+            .collect()
+    }
     fn configure_text(text: &NSTextView) {
         text.setEditable(false);
         text.setSelectable(true);
@@ -2529,6 +2806,7 @@ pub mod native {
         font_picker: Retained<NSPopUpButton>,
         _button_target: Retained<HeaderTarget>,
         bridge: Rc<ReaderBridge>,
+        media: Vec<Media>,
     }
     impl NativeRichView {
         /// # Safety
@@ -2645,6 +2923,7 @@ pub mod native {
                 font_picker,
                 _button_target: target,
                 bridge,
+                media: Vec::new(),
             };
             view.apply_appearance();
             Ok(view)
@@ -2742,6 +3021,7 @@ pub mod native {
             let document = RichDocument {
                 image_layouts: HashMap::new(),
                 image_links: HashMap::new(),
+                videos: Vec::new(),
                 source_sha256: String::new(),
                 blocks: vec![
                     super::Block::Paragraph {
@@ -2890,6 +3170,22 @@ pub mod native {
                 character = range.location + range.length.max(1);
             }
             let same_document = self.loaded_sha256.as_deref() == Some(&document.source_sha256);
+            let previous = std::mem::take(&mut self.media)
+                .into_iter()
+                .filter_map(|media| {
+                    if same_document {
+                        Some((media.key, media.view))
+                    } else {
+                        media.view.removeFromSuperview();
+                        None
+                    }
+                })
+                .collect();
+            let (attributed, media) = media_overlays(&attributed, &document.videos, previous);
+            for item in &media {
+                self.text.addSubview(&item.view);
+            }
+            self.media = media;
             let scroll_origin = self.scroll.contentView().bounds().origin;
             replace_text(&self.text, &attributed, same_document)?;
             *self.delegate.ivars().anchors.borrow_mut() =
@@ -2925,31 +3221,21 @@ pub mod native {
             let inset = ((width - 780.0) / 2.0).max(minimum_inset);
             let content_width = (width - inset * 2.0).max(80.0);
             self.document_view.ivars().inset.set(inset);
-            if let Some(storage) = unsafe { self.text.textStorage() } {
-                for (index, unit) in storage.string().to_string().encode_utf16().enumerate() {
-                    if unit == 0xfffc
-                        && let Some(object) = unsafe {
-                            storage.attribute_atIndex_effectiveRange(
-                                NSAttachmentAttributeName,
-                                index,
-                                std::ptr::null_mut(),
-                            )
-                        }
-                        && let Some(attachment) = object.downcast_ref::<NSTextAttachment>()
-                    {
-                        let bounds = attachment.bounds();
-                        let original = attachment
-                            .image()
-                            .map(|image| image.size())
-                            .unwrap_or(bounds.size);
-                        let available = (width - inset * 2.0).max(80.0);
-                        let factor = (available / original.width.max(1.0)).min(1.0);
-                        attachment.setBounds(NSRect::new(
-                            bounds.origin,
-                            NSSize::new(original.width * factor, original.height * factor),
-                        ));
-                    }
-                }
+            let placed = unsafe { self.text.textStorage() }
+                .map(|storage| attachments(&storage))
+                .unwrap_or_default();
+            let available = (width - inset * 2.0).max(80.0);
+            for (_, attachment) in &placed {
+                let bounds = attachment.bounds();
+                let original = attachment
+                    .image()
+                    .map(|image| image.size())
+                    .unwrap_or(bounds.size);
+                let factor = (available / original.width.max(1.0)).min(1.0);
+                attachment.setBounds(NSRect::new(
+                    bounds.origin,
+                    NSSize::new(original.width * factor, original.height * factor),
+                ));
             }
             let header_height = layout_text(&self.header_text, content_width);
             self.header_text.setFrameOrigin(NSPoint::new(inset, 38.0));
@@ -2991,6 +3277,31 @@ pub mod native {
             y += 25.0;
             let body_height = layout_text(&self.text, content_width);
             self.text.setFrameOrigin(NSPoint::new(inset, y));
+            if let (Some(manager), Some(container)) =
+                unsafe { (self.text.layoutManager(), self.text.textContainer()) }
+            {
+                let origin = self.text.textContainerOrigin();
+                for item in &self.media {
+                    let Some((index, _)) = placed
+                        .iter()
+                        .find(|(_, a)| std::ptr::eq(&**a, &*item.attachment))
+                    else {
+                        continue;
+                    };
+                    let glyphs = unsafe {
+                        manager.glyphRangeForCharacterRange_actualCharacterRange(
+                            NSRange::new(*index, 1),
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    let mut frame =
+                        manager.boundingRectForGlyphRange_inTextContainer(glyphs, &container);
+                    frame.origin.x += origin.x;
+                    frame.origin.y += origin.y;
+                    frame.size = item.attachment.bounds().size;
+                    item.view.setFrame(frame);
+                }
+            }
             self.document_view
                 .setFrameSize(NSSize::new(width, (y + body_height + 38.0).max(height)));
             self.document_view.setNeedsDisplay(true);
@@ -3013,6 +3324,13 @@ pub mod native {
                 return;
             }
             self.scroll.setHidden(!visible);
+            if !visible {
+                for item in &self.media {
+                    if let Some(web) = item.view.downcast_ref::<objc2_web_kit::WKWebView>() {
+                        unsafe { web.pauseAllMediaPlaybackWithCompletionHandler(None) };
+                    }
+                }
+            }
         }
         /// Give egui controls their native keyboard event destination. Merely
         /// setting an egui focus ID does not resign an AppKit text responder.
