@@ -7,6 +7,7 @@ pub enum Command {
     Save,
     Feed,
     Inbox,
+    Favorites,
     Archive,
     Feeds,
     Magazines,
@@ -95,7 +96,7 @@ mod macos {
             fn choose(&self, sender: &NSMenuItem) {
                 let edit_action=match sender.tag(){11=>Some(sel!(cut:)),12=>Some(sel!(copy:)),13=>Some(sel!(paste:)),14=>Some(sel!(selectAll:)),_=>None};
                 if let Some(action)=edit_action{let app=NSApplication::sharedApplication(self.mtm());if let Some(first)=app.keyWindow().and_then(|w|w.firstResponder()){let native:bool=unsafe{msg_send![&first,isKindOfClass:objc2::class!(NSTextView)]};if native{unsafe{app.sendAction_to_from(action,Some(&first),None);}return;}}}
-                let command = match sender.tag() { 0=>Command::Show,1=>Command::Quit,2=>Command::Save,3=>Command::Feed,4=>Command::Inbox,5=>Command::Archive,6=>Command::Feeds,7=>Command::Magazines,8=>Command::WhatsApp,9=>Command::ImportExport,10=>Command::Search,11=>Command::Cut,12=>Command::Copy,13=>Command::Paste,14=>Command::SelectAll,15=>Command::CheckForUpdates,16=>Command::ToggleAutomaticUpdates,_=>return };
+                let command = match sender.tag() { 0=>Command::Show,1=>Command::Quit,2=>Command::Save,3=>Command::Feed,4=>Command::Inbox,5=>Command::Archive,6=>Command::Feeds,7=>Command::Magazines,8=>Command::WhatsApp,9=>Command::ImportExport,10=>Command::Search,11=>Command::Cut,12=>Command::Copy,13=>Command::Paste,14=>Command::SelectAll,15=>Command::CheckForUpdates,16=>Command::ToggleAutomaticUpdates,17=>Command::Favorites,_=>return };
                 push(command);
             }
         }
@@ -158,6 +159,7 @@ mod macos {
                     "View",
                     vec![
                         ("Inbox", "2", 4),
+                        ("Favorites", "8", 17),
                         ("Archive", "3", 5),
                         ("Feeds", "4", 6),
                         ("Magazines", "5", 7),

@@ -551,6 +551,37 @@ mod macos {
             Ok(image.thumbnail(680, 880).to_rgba8())
         })
     }
+    /// Text and document metadata of a saved PDF link. Safe off the UI thread.
+    pub fn article_text(bytes: &[u8]) -> Result<super::PdfText, String> {
+        let data = NSData::with_bytes(bytes);
+        let document = unsafe { PDFDocument::initWithData(PDFDocument::alloc(), &data) }
+            .ok_or("The PDF could not be decoded")?;
+        if unsafe { document.isLocked() } {
+            return Err("The PDF is password protected".into());
+        }
+        let attributes = unsafe { document.documentAttributes() };
+        let attribute = |key: &NSString| {
+            attributes
+                .as_ref()
+                .and_then(|a| a.objectForKey(key.as_ref()))
+                .and_then(|value| value.downcast::<NSString>().ok())
+                .map(|value| value.to_string().trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        let pages = (0..unsafe { document.pageCount() }.min(super::PDF_PAGE_LIMIT))
+            .map(|index| {
+                unsafe { document.pageAtIndex(index) }
+                    .and_then(|page| unsafe { page.string() })
+                    .map(|text| text.to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        Ok(super::PdfText {
+            title: attribute(unsafe { objc2_pdf_kit::PDFDocumentTitleAttribute }),
+            author: attribute(unsafe { objc2_pdf_kit::PDFDocumentAuthorAttribute }),
+            pages,
+        })
+    }
     pub fn inspect_pdf(bytes: &[u8]) -> Result<(usize, String), String> {
         let data = NSData::with_bytes(bytes);
         let document = unsafe { PDFDocument::initWithData(PDFDocument::alloc(), &data) }
@@ -564,7 +595,17 @@ mod macos {
     }
 }
 #[cfg(target_os = "macos")]
-pub use macos::{PdfWindow, cover_thumbnail, inspect_pdf};
+pub use macos::{PdfWindow, article_text, cover_thumbnail, inspect_pdf};
+
+/// Pages read from a saved PDF link; later pages stay viewable in the PDF window.
+pub const PDF_PAGE_LIMIT: usize = 400;
+/// PDFKit text of a saved PDF link, one string per page.
+#[derive(Clone, Debug, Default)]
+pub struct PdfText {
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub pages: Vec<String>,
+}
 
 #[cfg(all(test, target_os = "macos"))]
 mod cover_tests {

@@ -5,6 +5,10 @@
 //! its own LRU bound. The only fixed budget is the app bundle, checked when it
 //! is packaged and by `storage-audit`.
 //!
+//! Saved local copies are the exception to disposable bodies: an article the
+//! reader explicitly keeps is stored under `saved-copies` in the same format,
+//! never expires or gets evicted, and is removed only on request or deletion.
+//!
 //! Reservations use locked files. A crashed process releases its lock, allowing
 //! the next writer to reclaim its claim without relying on PID reuse or clocks.
 use crate::domain::CopyStatus;
@@ -17,7 +21,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
@@ -25,6 +29,14 @@ use std::{
 /// The app bundle must stay strictly below this size.
 pub const APP_BUNDLE_LIMIT_BYTES: u64 = 50_000_000;
 pub const CACHE_BYTES: u64 = 20_000_000;
+/// Images stay below 5 MB; a saved PDF link keeps its exact bytes.
+fn media_limit(mime_type: &str) -> u64 {
+    if mime_type == "application/pdf" {
+        crate::network::MAX_PDF as u64
+    } else {
+        5_242_880
+    }
+}
 pub const DEFAULT_BUNDLE_BYTES: u64 = 45_000_000;
 const INDEX_LIMIT: u64 = 2_000_000;
 const TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
@@ -114,7 +126,7 @@ fn read_cached(directory: &Path) -> Result<CachedArticle> {
         fs::metadata(&metadata)?.len() <= CACHE_BYTES,
         "Cached metadata exceeds bound"
     );
-    let disk: DiskArticle = serde_json::from_reader(File::open(metadata)?)?;
+    let disk: DiskArticle = serde_json::from_slice(&fs::read(metadata)?)?;
     let mut media = Vec::new();
     let mut read_bytes = disk.html.len() as u64;
     for value in disk.media {
@@ -125,7 +137,7 @@ fn read_cached(directory: &Path) -> Result<CachedArticle> {
         let path = directory.join(value.path);
         ensure!(
             fs::symlink_metadata(&path)?.file_type().is_file()
-                && fs::metadata(&path)?.len() <= 5_242_880,
+                && fs::metadata(&path)?.len() <= media_limit(&value.mime_type),
             "Invalid cached image"
         );
         read_bytes = read_bytes.saturating_add(fs::metadata(&path)?.len());
@@ -152,6 +164,41 @@ fn read_cached(directory: &Path) -> Result<CachedArticle> {
         word_count: disk.word_count,
         fetched_at: disk.fetched_at,
     })
+}
+
+/// Write a complete article directory in the cache's on-disk format.
+fn write_article(directory: &Path, article: &CachedArticle) -> Result<()> {
+    let mut disk = DiskArticle {
+        html: article.html.clone(),
+        media: Vec::new(),
+        status: article.status,
+        error: article.error.clone(),
+        word_count: article.word_count,
+        fetched_at: article.fetched_at.clone(),
+    };
+    let mut bytes = article.html.len() as u64;
+    for (number, media) in article.media.iter().enumerate() {
+        ensure!(media.bytes.len() <= 5_242_880, "Saved image exceeds 5 MB");
+        bytes = bytes.saturating_add(media.bytes.len() as u64);
+        ensure!(bytes <= CACHE_BYTES, "Saved article exceeds its bound");
+        let mut file = private_file(&directory.join(number.to_string()))?;
+        file.set_len(0)?;
+        file.write_all(&media.bytes)?;
+        file.sync_all()?;
+        disk.media.push(DiskMedia {
+            id: media.id.clone(),
+            mime_type: media.mime_type.clone(),
+            path: number.to_string(),
+            sha256: format!("{:x}", Sha256::digest(&media.bytes)),
+        });
+    }
+    let mut file = private_file(&directory.join("article.json"))?;
+    file.set_len(0)?;
+    file.write_all(&serde_json::to_vec(&disk)?)?;
+    file.flush()?;
+    file.sync_all()?;
+    File::open(directory)?.sync_all()?;
+    Ok(())
 }
 
 pub struct Reservation {
@@ -343,6 +390,7 @@ impl Storage {
             root: root.to_path_buf(),
         };
         regular_directory(&value.cache())?;
+        regular_directory(&value.saved())?;
         regular_directory(&value.claims())?;
         let _guard = value.lock()?;
         if !value.root.join("storage-policy.json").exists() {
@@ -365,6 +413,12 @@ impl Storage {
     fn cache(&self) -> PathBuf {
         self.root.join("article-cache")
     }
+    fn saved(&self) -> PathBuf {
+        self.root.join("saved-copies")
+    }
+    fn saved_directory(&self, article_id: &str) -> PathBuf {
+        self.saved().join(key(article_id))
+    }
     fn claims(&self) -> PathBuf {
         self.root.join("storage-reservations")
     }
@@ -380,7 +434,7 @@ impl Storage {
         let temp = path.with_extension("pending");
         let mut file = private_file(&temp)?;
         file.set_len(0)?;
-        serde_json::to_writer(&mut file, value)?;
+        file.write_all(&serde_json::to_vec(value)?)?;
         file.flush()?;
         file.sync_all()?;
         fs::rename(temp, path)?;
@@ -400,7 +454,7 @@ impl Storage {
             fs::metadata(&path)?.len() <= INDEX_LIMIT,
             "Cache index exceeds its bound"
         );
-        let mut value: Index = serde_json::from_reader(File::open(path)?)?;
+        let mut value: Index = serde_json::from_slice(&fs::read(path)?)?;
         for entry in value.entries.values() {
             ensure!(
                 entry.path.len() == 64 && entry.path.bytes().all(|v| v.is_ascii_hexdigit()),
@@ -438,7 +492,9 @@ impl Storage {
                         file.metadata()?.len() <= 4096,
                         "Invalid storage reservation"
                     );
-                    let claim: Claim = serde_json::from_reader(file)?;
+                    let mut bytes = Vec::new();
+                    (&file).read_to_end(&mut bytes)?;
+                    let claim: Claim = serde_json::from_slice(&bytes)?;
                     total = total
                         .checked_add(claim.bytes)
                         .context("Reservation overflow")?;
@@ -451,7 +507,7 @@ impl Storage {
     fn snapshot_locked(&self) -> Result<Usage> {
         let reserved_bytes = self.claimed_locked()?;
         let bundle_bytes =
-            serde_json::from_reader(File::open(self.root.join("storage-policy.json"))?)?;
+            serde_json::from_slice(&fs::read(self.root.join("storage-policy.json"))?)?;
         Ok(Usage {
             managed_bytes: bytes_in(&self.root)?,
             bundle_bytes,
@@ -487,6 +543,7 @@ impl Storage {
             .filter(|(_, e)| e.expires_at <= now || !self.cache().join(&e.path).is_dir())
             .map(|(id, _)| id.clone())
             .collect();
+        let changed = !expired.is_empty();
         for id in expired {
             self.remove_entry(&mut index, &id)?;
         }
@@ -506,7 +563,23 @@ impl Storage {
                 fs::remove_dir_all(path)?;
             }
         }
-        self.save_index(&index)?;
+        // Every owner constructs a Storage, so an unchanged index is not
+        // rewritten: each durable save costs two full fsyncs on macOS.
+        if changed {
+            self.save_index(&index)?;
+        }
+        // Saved copies publish by renaming a complete hidden directory, so a
+        // hidden leftover is always an interrupted write.
+        for entry in fs::read_dir(self.saved())? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                ensure!(
+                    entry.file_type()?.is_dir(),
+                    "Invalid interrupted saved copy"
+                );
+                fs::remove_dir_all(entry.path())?;
+            }
+        }
         Ok(())
     }
     pub fn require(&self, bytes: u64) -> Result<Reservation> {
@@ -519,13 +592,10 @@ impl Storage {
         let path = self.claims().join(uuid::Uuid::new_v4().to_string());
         let mut file = private_file(&path)?;
         file.lock_exclusive()?;
-        serde_json::to_writer(
-            &mut file,
-            &Claim {
-                bytes,
-                kind: kind.chars().take(80).collect(),
-            },
-        )?;
+        file.write_all(&serde_json::to_vec(&Claim {
+            bytes,
+            kind: kind.chars().take(80).collect(),
+        })?)?;
         file.sync_all()?;
         Ok(Reservation {
             storage: self.clone(),
@@ -564,36 +634,53 @@ impl Storage {
         Ok(next)
     }
     pub fn cache_get(&self, article_id: &str) -> Result<Option<CachedArticle>> {
+        Ok(self.cache_get_many(&[article_id])?.pop().flatten())
+    }
+    /// Read several entries under one lock and one index save, so a list of
+    /// publication icons costs one durable write rather than one per icon.
+    pub fn cache_get_many(&self, article_ids: &[&str]) -> Result<Vec<Option<CachedArticle>>> {
         let _guard = self.lock()?;
         let mut index = self.read_index()?;
-        index.clock = index
-            .clock
-            .checked_add(1)
-            .context("Cache access clock overflow")?;
-        let Some(entry) = index.entries.get_mut(article_id) else {
-            return Ok(None);
-        };
         let now = chrono::Utc::now().timestamp();
-        if entry.expires_at <= now || !self.cache().join(&entry.path).is_dir() {
-            self.remove_entry(&mut index, article_id)?;
-            self.save_index(&index)?;
-            return Ok(None);
-        }
-        ensure!(entry.bytes <= CACHE_BYTES, "Cache entry exceeds bound");
-        let directory = self.cache().join(&entry.path);
-        let copy = match read_cached(&directory) {
-            Ok(copy) => copy,
-            Err(_) => {
-                // Cached copies are disposable. A damaged image or partial
-                // directory is a miss, preserving article quality and state.
-                self.remove_entry(&mut index, article_id)?;
-                self.save_index(&index)?;
-                return Ok(None);
+        let mut changed = false;
+        let mut copies = Vec::with_capacity(article_ids.len());
+        for &article_id in article_ids {
+            index.clock = index
+                .clock
+                .checked_add(1)
+                .context("Cache access clock overflow")?;
+            let Some(entry) = index.entries.get(article_id) else {
+                copies.push(None);
+                continue;
+            };
+            let directory = self.cache().join(&entry.path);
+            // Cached copies are disposable. An expired entry, a damaged image
+            // or a partial directory is a miss, preserving quality and state.
+            let copy = if entry.expires_at <= now || !directory.is_dir() {
+                None
+            } else {
+                ensure!(entry.bytes <= CACHE_BYTES, "Cache entry exceeds bound");
+                read_cached(&directory).ok()
+            };
+            changed = true;
+            match copy {
+                Some(copy) => {
+                    let clock = index.clock;
+                    if let Some(entry) = index.entries.get_mut(article_id) {
+                        entry.touched_at = clock;
+                    }
+                    copies.push(Some(copy));
+                }
+                None => {
+                    self.remove_entry(&mut index, article_id)?;
+                    copies.push(None);
+                }
             }
-        };
-        entry.touched_at = index.clock;
-        self.save_index(&index)?;
-        Ok(Some(copy))
+        }
+        if changed {
+            self.save_index(&index)?;
+        }
+        Ok(copies)
     }
     pub fn cache_put(
         &self,
@@ -620,7 +707,10 @@ impl Storage {
         };
         let mut bytes = 0u64;
         for (number, media) in article.media.iter().enumerate() {
-            ensure!(media.bytes.len() <= 5_242_880, "Cached image exceeds 5 MB");
+            ensure!(
+                media.bytes.len() as u64 <= media_limit(&media.mime_type),
+                "Cached media exceeds its size limit"
+            );
             bytes = bytes
                 .checked_add(media.bytes.len() as u64)
                 .context("Cache bytes overflow")?;
@@ -693,6 +783,63 @@ impl Storage {
             },
         );
         self.save_index(&index)?;
+        Ok(true)
+    }
+    /// Whether the reader kept a permanent local copy of this article.
+    pub fn has_saved(&self, article_id: &str) -> Result<bool> {
+        let _guard = self.lock()?;
+        Ok(self.saved_directory(article_id).is_dir())
+    }
+    /// Read a saved local copy. Unlike the cache, a damaged copy is an error
+    /// rather than a silent miss, so the reader never loses it unnoticed.
+    pub fn saved_get(&self, article_id: &str) -> Result<Option<CachedArticle>> {
+        let _guard = self.lock()?;
+        let directory = self.saved_directory(article_id);
+        match fs::symlink_metadata(&directory) {
+            Ok(_) => read_cached(&directory)
+                .map(Some)
+                .context("The saved local copy could not be read"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    /// Keep a permanent local copy, replacing any earlier one atomically.
+    pub fn saved_put(&self, article_id: &str, article: &CachedArticle) -> Result<()> {
+        let _guard = self.lock()?;
+        let name = key(article_id);
+        let staging = self.saved().join(format!(".{name}.pending"));
+        if fs::symlink_metadata(&staging).is_ok() {
+            fs::remove_dir_all(&staging)?;
+        }
+        regular_directory(&staging)?;
+        let result = (|| -> Result<()> {
+            write_article(&staging, article)?;
+            let target = self.saved().join(&name);
+            let previous = self.saved().join(format!(".{name}.previous"));
+            if fs::symlink_metadata(&target).is_ok() {
+                fs::rename(&target, &previous)?;
+            }
+            fs::rename(&staging, &target)?;
+            File::open(self.saved())?.sync_all()?;
+            if fs::symlink_metadata(&previous).is_ok() {
+                fs::remove_dir_all(&previous)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() && fs::symlink_metadata(&staging).is_ok() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result
+    }
+    /// Remove a saved local copy. Returns whether one existed.
+    pub fn saved_remove(&self, article_id: &str) -> Result<bool> {
+        let _guard = self.lock()?;
+        let directory = self.saved_directory(article_id);
+        if fs::symlink_metadata(&directory).is_err() {
+            return Ok(false);
+        }
+        fs::remove_dir_all(directory)?;
+        File::open(self.saved())?.sync_all()?;
         Ok(true)
     }
 }

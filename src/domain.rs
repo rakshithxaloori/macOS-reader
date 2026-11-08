@@ -25,6 +25,7 @@ id_type!(MagazineId);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scope {
     Inbox,
+    Favorites,
     Archive,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +164,8 @@ pub struct Article {
     pub saved_at: String,
     pub read_at: Option<String>,
     pub archived_at: Option<String>,
+    #[serde(default)]
+    pub favorited_at: Option<String>,
     pub deliberate: bool,
     pub excluded: bool,
     pub printed: u32,
@@ -185,6 +188,15 @@ pub struct ArticleBody {
     pub article: Article,
     pub html: String,
     pub media: Vec<(String, Vec<u8>)>,
+}
+impl ArticleBody {
+    /// The exact bytes of a saved PDF link, kept beside its reflowed prose.
+    pub fn pdf(&self) -> Option<&[u8]> {
+        self.media
+            .iter()
+            .map(|(_, bytes)| bytes.as_slice())
+            .find(|bytes| bytes.starts_with(b"%PDF-"))
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Feed {

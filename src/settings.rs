@@ -7,16 +7,20 @@ use std::{io::Write, os::unix::fs::OpenOptionsExt, path::Path};
 #[serde(default)]
 pub struct Settings {
     pub inbox: Query,
+    pub favorites: Query,
     pub archive: Query,
     pub appearance: crate::theme::Appearance,
     pub reader_size: f32,
     pub reader_font: ReaderFont,
     pub window_size: [f32; 2],
     pub inbox_scroll: f32,
+    pub favorites_scroll: f32,
     pub archive_scroll: f32,
     pub inbox_loaded: u32,
+    pub favorites_loaded: u32,
     pub archive_loaded: u32,
     pub inbox_grouped: bool,
+    pub favorites_grouped: bool,
     pub archive_grouped: bool,
     pub window_position: Option<[f32; 2]>,
     pub check_for_updates_on_launch: bool,
@@ -28,17 +32,21 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             inbox: Query::for_scope(Scope::Inbox),
+            favorites: Query::for_scope(Scope::Favorites),
             archive: Query::for_scope(Scope::Archive),
             appearance: crate::theme::Appearance::default(),
             reader_size: 19.,
             reader_font: ReaderFont::default(),
             window_size: [1240., 954.],
             inbox_scroll: 0.,
+            favorites_scroll: 0.,
             archive_scroll: 0.,
             inbox_loaded: 60,
+            favorites_loaded: 60,
             archive_loaded: 60,
             window_position: None,
             inbox_grouped: false,
+            favorites_grouped: false,
             archive_grouped: false,
             check_for_updates_on_launch: true,
             last_update_check: 0,
@@ -47,7 +55,49 @@ impl Default for Settings {
     }
 }
 
+/// The persisted list preferences of one article scope.
+pub struct List<'a> {
+    pub query: &'a mut Query,
+    pub scroll: &'a mut f32,
+    pub loaded: &'a mut u32,
+    pub grouped: &'a mut bool,
+}
 impl Settings {
+    pub fn query(&self, scope: Scope) -> &Query {
+        match scope {
+            Scope::Inbox => &self.inbox,
+            Scope::Favorites => &self.favorites,
+            Scope::Archive => &self.archive,
+        }
+    }
+    pub fn list(&mut self, scope: Scope) -> List<'_> {
+        let (query, scroll, loaded, grouped) = match scope {
+            Scope::Inbox => (
+                &mut self.inbox,
+                &mut self.inbox_scroll,
+                &mut self.inbox_loaded,
+                &mut self.inbox_grouped,
+            ),
+            Scope::Favorites => (
+                &mut self.favorites,
+                &mut self.favorites_scroll,
+                &mut self.favorites_loaded,
+                &mut self.favorites_grouped,
+            ),
+            Scope::Archive => (
+                &mut self.archive,
+                &mut self.archive_scroll,
+                &mut self.archive_loaded,
+                &mut self.archive_grouped,
+            ),
+        };
+        List {
+            query,
+            scroll,
+            loaded,
+            grouped,
+        }
+    }
     /// A launch check is due when enabled and a day has passed since the last.
     pub fn update_check_due(&self, now: i64) -> bool {
         self.check_for_updates_on_launch
@@ -70,6 +120,7 @@ impl Settings {
                     }
                 }
                 s.inbox_loaded = s.inbox_loaded.clamp(60, 1_000_000);
+                s.favorites_loaded = s.favorites_loaded.clamp(60, 1_000_000);
                 s.archive_loaded = s.archive_loaded.clamp(60, 1_000_000);
                 s
             })

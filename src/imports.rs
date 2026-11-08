@@ -15,7 +15,7 @@ const MAX_ROWS: usize = 5000;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Item {
-    Article(ArticleItem),
+    Article(Box<ArticleItem>),
     Feed(FeedItem),
 }
 impl Item {
@@ -46,6 +46,8 @@ pub struct ArticleItem {
     pub archived: bool,
     pub read_at: Option<String>,
     pub archived_at: Option<String>,
+    #[serde(default)]
+    pub favorited_at: Option<String>,
     pub metadata: Value,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -163,6 +165,7 @@ fn article(record: Value, format: &str, files: &BTreeMap<String, Vec<u8>>) -> Re
     };
     let read_at = date(get(&["readat"]))?;
     let archived_at = date(get(&["archivedat"]))?;
+    let favorited_at = date(get(&["favoritedat"]))?;
     let archived = bool_value(
         get(&["archived"]),
         archived_at.is_some()
@@ -203,7 +206,7 @@ fn article(record: Value, format: &str, files: &BTreeMap<String, Vec<u8>>) -> Re
         title.len() <= 1000 && site.len() <= 1000 && author.len() <= 1000,
         "Metadata field exceeds 1,000 characters"
     );
-    Ok(Item::Article(ArticleItem {
+    Ok(Item::Article(Box::new(ArticleItem {
         key,
         url: url.to_string(),
         title,
@@ -230,8 +233,9 @@ fn article(record: Value, format: &str, files: &BTreeMap<String, Vec<u8>>) -> Re
         archived,
         read_at,
         archived_at,
+        favorited_at,
         metadata: Value::Object(metadata),
-    }))
+    })))
 }
 pub fn preview(bytes: &[u8], filename: &str) -> Result<Preview> {
     ensure!(bytes.len() <= MAX_UPLOAD, "Upload exceeds 20 MB");
@@ -669,7 +673,7 @@ fn apply_item(tx: &Transaction<'_>, format: &str, item: &Item) -> Result<(String
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let added = old.is_none();
             if old.is_none() {
-                tx.execute("INSERT INTO articles(id,user_id,url,title,author,site,html,excerpt,word_count,status,saved_at,published_at,read_at,archived_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,COALESCE(?11,now()),?12,CASE WHEN ?13 THEN COALESCE(?14,?11,now()) ELSE NULL END,CASE WHEN ?15 THEN COALESCE(?16,?11,now()) ELSE NULL END)",params![id,OWNER,a.url,a.title,a.author,a.site,html,excerpt,words,if words>0 || lean {a.status.as_str()}else{"pending"},a.saved_at,a.published_at,a.read,a.read_at,a.archived,a.archived_at])?;
+                tx.execute("INSERT INTO articles(id,user_id,url,title,author,site,html,excerpt,word_count,status,saved_at,published_at,read_at,archived_at,favorited_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,COALESCE(?11,now()),?12,CASE WHEN ?13 THEN COALESCE(?14,?11,now()) ELSE NULL END,CASE WHEN ?15 THEN COALESCE(?16,?11,now()) ELSE NULL END,?17)",params![id,OWNER,a.url,a.title,a.author,a.site,html,excerpt,words,if words>0 || lean {a.status.as_str()}else{"pending"},a.saved_at,a.published_at,a.read,a.read_at,a.archived,a.archived_at,a.favorited_at])?;
                 if words == 0 {
                     library::enqueue(tx, "article", &id)?;
                 }

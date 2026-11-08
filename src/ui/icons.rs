@@ -5,6 +5,7 @@ pub enum Icon {
     Book,
     Plus,
     Inbox,
+    Star,
     Archive,
     Rss,
     Newspaper,
@@ -118,6 +119,17 @@ pub fn draw(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
                 (16., 13.),
                 (21., 13.),
             ]);
+        }
+        Icon::Star => {
+            // Five-point outline, alternating outer and inner radii.
+            let points: Vec<Pos2> = (0..=10)
+                .map(|i| {
+                    let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.;
+                    let r = if i % 2 == 0 { 10. } else { 4.4 };
+                    p(12. + r * a.cos(), 12.8 + r * a.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::line(points, stroke));
         }
         Icon::Archive => {
             painter.rect_stroke(

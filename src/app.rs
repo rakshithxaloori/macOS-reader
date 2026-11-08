@@ -88,6 +88,9 @@ pub struct App {
     body_loading: bool,
     body_error: Option<String>,
     fetched_at: Option<String>,
+    /// The selected article is shown from a saved local copy.
+    local_copy: bool,
+    saving_copy: bool,
     has_more: bool,
     matching_count: u32,
     logos: std::collections::HashMap<String, egui::TextureHandle>,
@@ -210,6 +213,8 @@ impl App {
             body_loading: false,
             body_error: None,
             fetched_at: None,
+            local_copy: false,
+            saving_copy: false,
             has_more: false,
             matching_count: 0,
             repaint: cc.egui_ctx.clone(),
@@ -262,12 +267,12 @@ impl App {
         app.refresh();
         app
     }
+    /// The list scope of the current view; non-list views keep the Inbox query.
+    fn scope(&self) -> Scope {
+        self.view.scope().unwrap_or(Scope::Inbox)
+    }
     fn query(&self) -> &Query {
-        if self.view == View::Archive {
-            &self.settings.archive
-        } else {
-            &self.settings.inbox
-        }
+        self.settings.query(self.scope())
     }
     fn send(&mut self, c: Command) {
         if let Command::Refetch(id) = &c
@@ -287,7 +292,10 @@ impl App {
             }
             return;
         }
-        let is_body_request = matches!(&c, Command::Body { .. } | Command::RefreshBody { .. });
+        let is_body_request = matches!(
+            &c,
+            Command::Body { .. } | Command::RefreshBody { .. } | Command::SaveLocalCopy { .. }
+        );
         if !matches!(
             c,
             Command::List { .. }
@@ -296,6 +304,8 @@ impl App {
                 | Command::CancelBody
                 | Command::RefreshBody { .. }
                 | Command::RefreshSelected { .. }
+                | Command::SaveLocalCopy { .. }
+                | Command::RemoveLocalCopy(_)
                 | Command::FetchedMetadata(_)
                 | Command::Summary
                 | Command::Pdf(_)
@@ -330,12 +340,7 @@ impl App {
             ReloadStep::List => {
                 self.generation += 1;
                 self.loading = true;
-                let loaded = if self.view == View::Archive {
-                    self.settings.archive_loaded
-                } else {
-                    self.settings.inbox_loaded
-                }
-                .max(60);
+                let loaded = (*self.settings.list(self.scope()).loaded).max(60);
                 Command::Reconcile {
                     generation: self.generation,
                     query: self.query().clone(),
@@ -477,6 +482,8 @@ impl App {
         self.body_loading = true;
         self.body_error = None;
         self.fetched_at = None;
+        self.local_copy = false;
+        self.saving_copy = false;
         if let Some(article) = self.rows.iter().find(|a| a.id == id).cloned().or_else(|| {
             self.selected
                 .as_ref()
@@ -597,11 +604,7 @@ impl App {
                                 }
                             }
                         }
-                        if self.view == View::Archive {
-                            self.settings.archive_loaded = self.rows.len() as u32;
-                        } else {
-                            self.settings.inbox_loaded = self.rows.len() as u32;
-                        }
+                        *self.settings.list(self.scope()).loaded = self.rows.len() as u32;
                         self.loading = false;
                     }
                 }
@@ -609,6 +612,7 @@ impl App {
                     generation,
                     mut body,
                     fetched_at,
+                    local_copy,
                 } => {
                     if generation == self.body_generation {
                         if let Some(selected) = self
@@ -618,6 +622,7 @@ impl App {
                         {
                             body.article.read_at = selected.article.read_at.clone();
                             body.article.archived_at = selected.article.archived_at.clone();
+                            body.article.favorited_at = selected.article.favorited_at.clone();
                         }
                         self.reader.set_html(&body.html);
                         for (id, bytes) in &body.media {
@@ -631,6 +636,8 @@ impl App {
                         self.send(Command::FetchedMetadata(Box::new(body.article.clone())));
                         self.selected = Some(*body);
                         self.fetched_at = fetched_at;
+                        self.local_copy = local_copy;
+                        self.saving_copy = false;
                         self.body_error = None;
                         self.native_dirty = true;
                         self.body_loading = false;
@@ -645,8 +652,16 @@ impl App {
                         && self.selected.as_ref().is_some_and(|b| b.article.id == id)
                     {
                         self.body_loading = false;
+                        self.saving_copy = false;
                         self.body_error = Some(message);
                         self.native_dirty = true;
+                    }
+                }
+                Event::LocalCopyRemoved(id) => {
+                    if self.selected.as_ref().is_some_and(|b| b.article.id == id) {
+                        self.local_copy = false;
+                        self.native_dirty = true;
+                        self.notice = "Local copy removed".into();
                     }
                 }
                 Event::SelectedMetadata {
@@ -805,7 +820,7 @@ impl App {
                 self.selected = None;
                 self.body_generation += 1;
                 self.send(Command::CancelBody);
-                if matches!(v, View::Inbox | View::Archive) {
+                if v.scope().is_some() {
                     self.refresh();
                 } else {
                     self.send(Command::Summary);
@@ -815,24 +830,34 @@ impl App {
                 }
             }
             Action::Open(id) => self.open(id),
+            Action::OpenArticlePdf => {
+                if let Some(body) = &self.selected
+                    && let Some(bytes) = body.pdf()
+                {
+                    match PdfWindow::open(bytes, &format!("{} · Reader", body.article.title)) {
+                        Ok(window) => {
+                            window.set_appearance(self.settings.appearance);
+                            self.pdfs.push(window);
+                        }
+                        Err(error) => self.error = error,
+                    }
+                }
+            }
             Action::CloseReader => {
                 self.body_generation += 1;
                 self.selected = None;
                 self.body_loading = false;
                 self.body_error = None;
                 self.fetched_at = None;
+                self.local_copy = false;
+                self.saving_copy = false;
                 self.send(Command::CancelBody);
             }
             Action::Query(q) => {
-                if q.scope == Scope::Archive {
-                    self.settings.archive = q;
-                    self.settings.archive_scroll = 0.;
-                    self.settings.archive_loaded = 60;
-                } else {
-                    self.settings.inbox = q;
-                    self.settings.inbox_scroll = 0.;
-                    self.settings.inbox_loaded = 60;
-                }
+                let list = self.settings.list(q.scope);
+                *list.query = q;
+                *list.scroll = 0.;
+                *list.loaded = 60;
                 self.rows.clear();
                 self.refresh();
             }
@@ -946,15 +971,10 @@ impl App {
                 }
             }
             Action::Group(grouped) => {
-                if self.view == View::Archive {
-                    self.settings.archive_grouped = grouped;
-                    self.settings.archive_scroll = 0.;
-                    self.settings.archive.publication.clear();
-                } else {
-                    self.settings.inbox_grouped = grouped;
-                    self.settings.inbox_scroll = 0.;
-                    self.settings.inbox.publication.clear();
-                }
+                let list = self.settings.list(self.scope());
+                *list.grouped = grouped;
+                *list.scroll = 0.;
+                list.query.publication.clear();
                 self.refresh();
             }
             Action::ConfirmDeleteMatching { query, expected } => {
@@ -978,6 +998,20 @@ impl App {
                 self.selecting = false;
                 self.view = View::Magazines;
             }
+            Action::SaveLocalCopy(id) => {
+                if self.selected.as_ref().is_some_and(|b| b.article.id == id) {
+                    // A new generation keeps a racing open from overwriting the result.
+                    self.body_generation += 1;
+                    self.saving_copy = true;
+                    self.body_error = None;
+                    self.native_dirty = true;
+                    self.send(Command::SaveLocalCopy {
+                        generation: self.body_generation,
+                        id,
+                    });
+                }
+            }
+            Action::RemoveLocalCopy(id) => self.send(Command::RemoveLocalCopy(id)),
             Action::FontSize(size) => {
                 self.settings.reader_size = size;
                 self.native_dirty = true;
@@ -1153,6 +1187,7 @@ impl eframe::App for App {
                 M::Save => Action::SaveDialog,
                 M::Feed => Action::FeedDialog,
                 M::Inbox => Action::Navigate(View::Inbox),
+                M::Favorites => Action::Navigate(View::Favorites),
                 M::Archive => Action::Navigate(View::Archive),
                 M::Feeds => Action::Navigate(View::Feeds),
                 M::Magazines => Action::Navigate(View::Magazines),
@@ -1308,10 +1343,17 @@ impl eframe::App for App {
                     metadata,
                     read: article.read_at.is_some(),
                     archived: article.archived_at.is_some(),
-                    fetch_info: self
-                        .fetched_at
-                        .as_ref()
-                        .map(|at| format!("Fetched {}", crate::domain::date_label(at))),
+                    fetch_info: self.fetched_at.as_ref().map(|at| {
+                        format!(
+                            "{}Fetched {}",
+                            if self.local_copy {
+                                "Saved locally · "
+                            } else {
+                                ""
+                            },
+                            crate::domain::date_label(at)
+                        )
+                    }),
                     notice,
                 },
                 self.settings.reader_font,
@@ -1441,17 +1483,14 @@ impl eframe::App for App {
             .resizable(false)
             .frame(egui::Frame::NONE.fill(colors.sidebar))
             .show(ui, |ui| ui::rail::draw(ui, self.view, &mut actions));
-        if matches!(self.view, View::Inbox | View::Archive) {
+        if let Some(scope) = self.view.scope() {
             let width = if ui.available_width() + 64. < 1100. {
                 300.
             } else {
                 340.
             };
-            let scroll = if self.view == View::Archive {
-                self.settings.archive_scroll
-            } else {
-                self.settings.inbox_scroll
-            };
+            let list = self.settings.list(scope);
+            let (scroll, grouped) = (*list.scroll, *list.grouped);
             let mut new_scroll = scroll;
             egui::Panel::left("articles")
                 .exact_size(width)
@@ -1466,11 +1505,7 @@ impl eframe::App for App {
                             rows: &self.rows,
                             total: self.matching_count,
                             library_total: self.counts.all,
-                            grouped: if self.view == View::Archive {
-                                self.settings.archive_grouped
-                            } else {
-                                self.settings.inbox_grouped
-                            },
+                            grouped,
                             logos: &self.logos,
                             publications: &self.publications,
                             selected: self.selected.as_ref().map(|a| &a.article.id),
@@ -1484,11 +1519,7 @@ impl eframe::App for App {
                         &mut actions,
                     );
                 });
-            if self.view == View::Archive {
-                self.settings.archive_scroll = new_scroll;
-            } else {
-                self.settings.inbox_scroll = new_scroll;
-            }
+            *self.settings.list(scope).scroll = new_scroll;
             let mut reader_layout = ui::reader::ReaderLayout::default();
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(colors.reader))
@@ -1503,10 +1534,16 @@ impl eframe::App for App {
                             loading: self.body_loading,
                             error: self.body_error.as_deref(),
                             fetched_at: self.fetched_at.as_deref(),
+                            local_copy: self.local_copy,
+                            saving_copy: self.saving_copy,
                             has_copy: self
                                 .selected
                                 .as_ref()
                                 .is_some_and(|body| !body.html.trim().is_empty()),
+                            pdf: self
+                                .selected
+                                .as_ref()
+                                .is_some_and(|body| body.pdf().is_some()),
                             native: self.native_reader.is_some(),
                         },
                         &mut actions,

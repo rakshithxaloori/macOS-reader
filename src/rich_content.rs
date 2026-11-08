@@ -63,6 +63,8 @@ pub enum Block {
 pub struct RichDocument {
     pub image_layouts: HashMap<String, String>,
     pub image_links: HashMap<String, String>,
+    /// Caption links of image-free figures that `video_player` can play.
+    pub videos: Vec<String>,
     pub blocks: Vec<Block>,
     /// Digest of the original saved bytes, never of a flattened presentation.
     pub source_sha256: String,
@@ -91,9 +93,22 @@ impl RichDocument {
                 Some((source.to_owned(), parent.value().attr("href")?.to_owned()))
             })
             .collect();
+        let videos = html
+            .select(&selector("figure > figcaption a[href]"))
+            .filter(|link| {
+                link.ancestors()
+                    .filter_map(ElementRef::wrap)
+                    .find(|e| e.value().name() == "figure")
+                    .is_some_and(|figure| figure.select(&selector("img")).next().is_none())
+            })
+            .filter_map(|link| link.value().attr("href"))
+            .filter(|href| video_player(href).is_some())
+            .map(str::to_owned)
+            .collect();
         Self {
             image_layouts,
             image_links,
+            videos,
             blocks,
             source_sha256: format!("{:x}", Sha256::digest(saved_html.as_bytes())),
         }
@@ -124,6 +139,65 @@ impl RichDocument {
         collect(&self.blocks, &mut out);
         out
     }
+}
+/// The page the native reader loads in place of a saved video link: a YouTube
+/// or Vimeo player, or a plain HTML5 player for a direct video file. Links to
+/// anything else stay links.
+pub fn video_player(href: &str) -> Option<String> {
+    let url = url::Url::parse(href).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url
+        .host_str()?
+        .trim_start_matches("www.")
+        .trim_start_matches("m.");
+    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let id = |value: &str| {
+        (!value.is_empty()
+            && value.len() <= 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+        .then(|| value.to_owned())
+    };
+    let frame = match (host, segments.as_slice()) {
+        ("youtube.com" | "youtube-nocookie.com", ["watch"]) => url
+            .query_pairs()
+            .find(|(k, _)| k == "v")
+            .and_then(|(_, v)| id(&v))
+            .map(|v| format!("https://www.youtube-nocookie.com/embed/{v}")),
+        ("youtube.com" | "youtube-nocookie.com", ["embed" | "shorts" | "live", v])
+        | ("youtu.be", [v]) => id(v).map(|v| format!("https://www.youtube-nocookie.com/embed/{v}")),
+        ("vimeo.com", [v]) | ("player.vimeo.com", ["video", v])
+            if v.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            Some(format!("https://player.vimeo.com/video/{v}"))
+        }
+        _ => None,
+    };
+    let body = if let Some(frame) = frame {
+        format!(
+            "<iframe src=\"{frame}\" allow=\"autoplay; encrypted-media; fullscreen; picture-in-picture\" allowfullscreen></iframe>"
+        )
+    } else {
+        let file = segments.last()?.to_ascii_lowercase();
+        if ![".mp4", ".m4v", ".mov", ".webm"]
+            .iter()
+            .any(|ext| file.ends_with(ext))
+        {
+            return None;
+        }
+        let source = url
+            .as_str()
+            .replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('<', "&lt;");
+        format!("<video src=\"{source}\" controls playsinline preload=\"metadata\"></video>")
+    };
+    Some(format!(
+        "<!doctype html><meta name=\"referrer\" content=\"strict-origin\"><style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}iframe,video{{border:0;width:100%;height:100%;display:block}}</style>{body}"
+    ))
 }
 fn selector(css: &str) -> Selector {
     Selector::parse(css).expect("static selector")
@@ -859,6 +933,36 @@ mod tests {
             document.image_links.get("/api/media/x").map(String::as_str),
             Some("https://example.org/full")
         );
+    }
+    #[test]
+    fn only_recognized_video_captions_become_players() {
+        let document = RichDocument::parse(
+            "<p><a href='https://www.youtube.com/watch?v=prose1'>prose link</a></p>\
+             <figure><figcaption>Video · <a href='https://www.youtube.com/watch?v=abc_12-3'>Watch on YouTube</a></figcaption></figure>\
+             <figure><figcaption>Video · <a href='https://example.org/post'>Watch on the original page</a></figcaption></figure>\
+             <figure><img src='/api/media/x'><figcaption><a href='https://vimeo.com/42'>Credit</a></figcaption></figure>\
+             <figure><figcaption>Video · <a href='https://example.org/a.MP4?x=1&y=2'>Watch the video</a></figcaption></figure>",
+        );
+        assert_eq!(
+            document.videos,
+            vec![
+                "https://www.youtube.com/watch?v=abc_12-3",
+                "https://example.org/a.MP4?x=1&y=2"
+            ]
+        );
+        let player = |href| video_player(href).unwrap_or_default();
+        assert!(player("https://youtu.be/abc").contains("youtube-nocookie.com/embed/abc\""));
+        assert!(player("https://m.youtube.com/shorts/xyz").contains("/embed/xyz\""));
+        assert!(player("https://vimeo.com/42").contains("player.vimeo.com/video/42\""));
+        assert!(player("https://example.org/a.mp4?x=1&y=2").contains("a.mp4?x=1&amp;y=2\""));
+        for rejected in [
+            "https://www.youtube.com/watch?v=a\"b",
+            "https://vimeo.com/channel",
+            "https://example.org/post",
+            "javascript:alert(1)//x.mp4",
+        ] {
+            assert!(video_player(rejected).is_none(), "{rejected}");
+        }
     }
     #[test]
     fn linked_cached_images_keep_their_layout() {
@@ -1894,6 +1998,186 @@ pub mod native {
             #[unsafe(method(drawRect:))]fn draw_rect(&self,_dirty:NSRect){let colors=self.ivars().appearance.get().palette();native_color(colors.reader).setFill();objc2_app_kit::NSRectFill(self.bounds());let y=self.ivars().divider.get();if y>0.0{native_color(colors.divider).setFill();let inset=self.ivars().inset.get();objc2_app_kit::NSRectFill(NSRect::new(NSPoint::new(inset,y),NSSize::new((self.bounds().size.width-inset*2.0).max(1.0),1.0)));}}
         }
     );
+    /// Animated GIFs stay still inside TextKit attachments, and video cannot run
+    /// there at all. Native views are laid over their attachments instead.
+    struct Media {
+        key: String,
+        attachment: Retained<NSTextAttachment>,
+        view: Retained<NSView>,
+    }
+    define_class!(
+        // Clicks pass through to the text view, so linked images stay links.
+        #[unsafe(super(objc2_app_kit::NSImageView, objc2_app_kit::NSControl, NSView))] #[thread_kind=MainThreadOnly] #[name="ReadingListReaderAnimatedImage"]
+        struct AnimatedImageView;
+        impl AnimatedImageView{
+            #[unsafe(method(hitTest:))]fn hit_test(&self,_point:NSPoint)->*mut NSView{std::ptr::null_mut()}
+        }
+    );
+    define_class!(
+        // The player has nothing to scroll; wheel events scroll the article, even
+        // when the pointer rests on the video.
+        #[unsafe(super(objc2_web_kit::WKWebView, NSView))] #[thread_kind=MainThreadOnly] #[name="ReadingListReaderVideoView"]
+        struct VideoView;
+        impl VideoView{
+            #[unsafe(method(scrollWheel:))]fn scroll_wheel(&self,event:&objc2_app_kit::NSEvent){if let Some(scroll)=self.enclosingScrollView(){scroll.scrollWheel(event);}}
+        }
+    );
+    const VIDEO_WIDTH: f64 = 780.0;
+    /// Players load with this origin as their referrer; YouTube refuses an empty one.
+    const VIDEO_ORIGIN: &str = "https://reader.rakshithxaloori.com/";
+    fn animated(image: &NSImage) -> bool {
+        image.representations().iter().any(|rep| {
+            rep.downcast_ref::<objc2_app_kit::NSBitmapImageRep>()
+                .and_then(|bitmap| {
+                    bitmap.valueForProperty(unsafe { objc2_app_kit::NSImageFrameCount })
+                })
+                .and_then(|count| count.downcast::<objc2_foundation::NSNumber>().ok())
+                .is_some_and(|count| count.integerValue() > 1)
+        })
+    }
+    fn link_href(value: &AnyObject) -> Option<String> {
+        value
+            .downcast_ref::<NSURL>()
+            .and_then(|url| url.absoluteString())
+            .map(|url| url.to_string())
+            .or_else(|| {
+                value
+                    .downcast_ref::<NSString>()
+                    .map(|href| href.to_string())
+            })
+    }
+    /// Put a 16:9 attachment at the start of each playable video caption and
+    /// pair every animated or video attachment with its native view. Views of
+    /// the previous copy of the same document are reused, so a font or theme
+    /// change does not restart playback.
+    fn media_overlays(
+        attributed: &NSAttributedString,
+        videos: &[String],
+        mut previous: HashMap<String, Retained<NSView>>,
+    ) -> (Retained<NSAttributedString>, Vec<Media>) {
+        let mtm = MainThreadMarker::new().expect("reader media is built on the main thread");
+        let output = NSMutableAttributedString::initWithAttributedString(
+            NSMutableAttributedString::alloc(),
+            attributed,
+        );
+        let mut links = Vec::new();
+        let mut index = 0;
+        while index < output.length() {
+            let mut range = NSRange::new(index, 1);
+            if let Some(value) = unsafe {
+                output.attribute_atIndex_effectiveRange(NSLinkAttributeName, index, &mut range)
+            } && let Some(href) = link_href(&value)
+                && videos.contains(&href)
+            {
+                links.push((range, href));
+            }
+            index = range.location + range.length.max(1);
+        }
+        let mut players = Vec::new();
+        // Insert from the end so earlier ranges stay valid.
+        for (range, href) in links.into_iter().rev() {
+            let start = output.string().paragraphRangeForRange(range).location;
+            let attributes =
+                unsafe { output.attributesAtIndex_effectiveRange(start, std::ptr::null_mut()) };
+            let placeholder = unsafe {
+                NSMutableAttributedString::initWithString_attributes(
+                    NSMutableAttributedString::alloc(),
+                    &NSString::from_str("\u{fffc}\u{2028}"),
+                    Some(&attributes),
+                )
+            };
+            let size = NSSize::new(VIDEO_WIDTH, VIDEO_WIDTH * 9.0 / 16.0);
+            let attachment = NSTextAttachment::new();
+            // An empty image of the player size keeps the full size for resizing.
+            attachment.setImage(Some(&NSImage::initWithSize(NSImage::alloc(), size)));
+            attachment.setBounds(NSRect::new(NSPoint::new(0.0, 0.0), size));
+            unsafe {
+                placeholder.removeAttribute_range(NSLinkAttributeName, NSRange::new(0, 2));
+                placeholder.addAttribute_value_range(
+                    NSAttachmentAttributeName,
+                    &attachment,
+                    NSRange::new(0, 1),
+                );
+            }
+            output.insertAttributedString_atIndex(&placeholder, start);
+            players.push((href, attachment));
+        }
+        let mut media = Vec::new();
+        for (ordinal, (href, attachment)) in players.into_iter().rev().enumerate() {
+            let key = format!("video:{ordinal}:{href}");
+            let view = previous.remove(&key).unwrap_or_else(|| {
+                let configuration = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
+                unsafe {
+                    configuration
+                        .preferences()
+                        .setElementFullscreenEnabled(true)
+                };
+                let web: Retained<VideoView> = unsafe {
+                    msg_send![VideoView::alloc(mtm), initWithFrame: attachment.bounds(), configuration: &*configuration]
+                };
+                if let Some(page) = super::video_player(&href) {
+                    unsafe {
+                        web.loadHTMLString_baseURL(
+                            &NSString::from_str(&page),
+                            NSURL::URLWithString(&NSString::from_str(VIDEO_ORIGIN)).as_deref(),
+                        )
+                    };
+                }
+                web.into_super().into_super()
+            });
+            media.push(Media {
+                key,
+                attachment,
+                view,
+            });
+        }
+        let gifs = attachments(&output)
+            .into_iter()
+            .map(|(_, attachment)| attachment)
+            .filter(|attachment| attachment.image().is_some_and(|image| animated(&image)));
+        for (ordinal, attachment) in gifs.enumerate() {
+            let key = format!("gif:{ordinal}");
+            let view = previous.remove(&key).unwrap_or_else(|| {
+                let view: Retained<AnimatedImageView> = unsafe {
+                    msg_send![AnimatedImageView::alloc(mtm), initWithFrame: attachment.bounds()]
+                };
+                view.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
+                view.setAnimates(true);
+                view.into_super().into_super().into_super()
+            });
+            if let Some(image_view) = view.downcast_ref::<objc2_app_kit::NSImageView>() {
+                image_view.setImage(attachment.image().as_deref());
+            }
+            media.push(Media {
+                key,
+                attachment,
+                view,
+            });
+        }
+        for view in previous.into_values() {
+            view.removeFromSuperview();
+        }
+        (output.into_super(), media)
+    }
+    fn attachments(text: &NSAttributedString) -> Vec<(usize, Retained<NSTextAttachment>)> {
+        text.string()
+            .to_string()
+            .encode_utf16()
+            .enumerate()
+            .filter(|(_, unit)| *unit == 0xfffc)
+            .filter_map(|(index, _)| {
+                unsafe {
+                    text.attribute_atIndex_effectiveRange(
+                        NSAttachmentAttributeName,
+                        index,
+                        std::ptr::null_mut(),
+                    )
+                }
+                .and_then(|object| object.downcast::<NSTextAttachment>().ok())
+                .map(|attachment| (index, attachment))
+            })
+            .collect()
+    }
     fn configure_text(text: &NSTextView) {
         text.setEditable(false);
         text.setSelectable(true);
@@ -1905,6 +2189,88 @@ pub mod native {
         text.setTextContainerInset(NSSize::new(0.0, 0.0));
         configure_text_appearance(text, Appearance::Light);
     }
+    /// Space after a reader paragraph, in ems. Substack-like airy rhythm.
+    const PARAGRAPH_AFTER: f32 = 1.6;
+    /// Space above and below an image, in ems.
+    const IMAGE_AROUND: f32 = 1.4;
+    /// Space between an image and its caption, and between list items.
+    const TIGHT_AFTER: f32 = 0.6;
+    /// Tighten spacing inside groups that read as one unit: an image and the
+    /// caption under it, and consecutive items of one list. The group as a
+    /// whole keeps the full paragraph spacing after it.
+    fn reader_block_rhythm(rtf: &str, twips: impl Fn(f32) -> u32) -> String {
+        let image = format!(
+            "{{\\pard\\qc\\sb{}\\sa{} ",
+            twips(IMAGE_AROUND),
+            twips(IMAGE_AROUND)
+        );
+        let paragraph = format!("\\sa{} ", twips(PARAGRAPH_AFTER));
+        let tight = format!("\\sa{} ", twips(TIGHT_AFTER));
+        let caption = "\\f2\\fs26\\cf3";
+        let list_item = "\\fi-240 ";
+        let lines: Vec<&str> = rtf.split_inclusive('\n').collect();
+        let mut output = String::with_capacity(rtf.len() + 64);
+        for (index, line) in lines.iter().enumerate() {
+            let next = lines.get(index + 1).copied().unwrap_or_default();
+            if line.starts_with(&image) && next.starts_with("{\\pard") && next.contains(caption) {
+                output.push_str(&line.replacen(
+                    &image,
+                    &format!(
+                        "{{\\pard\\qc\\sb{}\\sa{} ",
+                        twips(IMAGE_AROUND),
+                        twips(TIGHT_AFTER)
+                    ),
+                    1,
+                ));
+            } else if line.starts_with("{\\pard")
+                && line.contains(list_item)
+                && next.starts_with("{\\pard")
+                && next.contains(list_item)
+            {
+                output.push_str(&line.replacen(&paragraph, &tight, 1));
+            } else {
+                output.push_str(line);
+            }
+        }
+        output
+    }
+    #[cfg(test)]
+    #[test]
+    fn reader_rhythm_tightens_captions_and_list_items_only_inside_groups() {
+        let twips = |ems: f32| (19.0 * ems * 20.0).round() as u32;
+        let image = format!(
+            "{{\\pard\\qc\\sb{0}\\sa{0} RLIMAGE\\par}}\n",
+            twips(IMAGE_AROUND)
+        );
+        let caption = format!(
+            "{{\\pard\\sa{} \\f2\\fs26\\cf3 Caption\\par}}\n",
+            twips(PARAGRAPH_AFTER)
+        );
+        let item = |text: &str| {
+            format!(
+                "{{\\pard\\sa{} \\li360\\fi-240 {text}\\par}}\n",
+                twips(PARAGRAPH_AFTER)
+            )
+        };
+        let body = format!("{{\\pard\\sa{} Body\\par}}\n", twips(PARAGRAPH_AFTER));
+        let input = [
+            image.clone(),
+            caption.clone(),
+            item("One"),
+            item("Two"),
+            body.clone(),
+            image.clone(),
+            body.clone(),
+        ]
+        .concat();
+        let output = reader_block_rhythm(&input, twips);
+        let lines: Vec<_> = output.lines().collect();
+        assert!(lines[0].contains(&format!("\\sa{} ", twips(TIGHT_AFTER))));
+        assert!(lines[2].contains(&format!("\\sa{} ", twips(TIGHT_AFTER))));
+        assert!(lines[3].contains(&format!("\\sa{} ", twips(PARAGRAPH_AFTER))));
+        assert_eq!(format!("{}\n", lines[5]), image);
+        assert_eq!(format!("{}\n", lines[1]), caption);
+    }
     /// The reader body's attributed text, with screen typography and native blocks.
     pub fn reader_document(
         document: &RichDocument,
@@ -1914,6 +2280,8 @@ pub mod native {
         appearance: Appearance,
     ) -> Result<Retained<NSAttributedString>, String> {
         let half_points = (body_size * 2.0).round() as u32;
+        // Vertical rhythm in ems of the body size, converted to RTF twips.
+        let twips = |ems: f32| (body_size * ems * 20.0).round() as u32;
         let mut rtf = String::from_utf8(themed_reader_rtf(
             document, images, body_size, font, appearance,
         )?)
@@ -1922,22 +2290,30 @@ pub mod native {
         .replace("\\sl444\\slmult1", "\\sl384\\slmult1")
         .replace(
             &format!("\\sa{}", half_points * 5),
-            &format!("\\sa{}", (body_size * 1.3 * 20.0).round() as u32),
+            &format!("\\sa{}", twips(PARAGRAPH_AFTER)),
         )
-        .replace("\\f2\\fs24\\cf3", "\\f2\\fs26\\cf3\\sl360\\slmult1\\sa160")
+        .replace(
+            "\\f2\\fs24\\cf3",
+            &format!(
+                "\\f2\\fs26\\cf3\\sl360\\slmult1\\sa{}",
+                twips(PARAGRAPH_AFTER)
+            ),
+        )
         // Quotes are set upright beside a native bar, as publishers style them.
         .replace("\\li360\\i ", "\\li360 ")
-        // Images otherwise butt against the following paragraph.
+        // Images get room above and below, as publishers like Substack set them.
         .replace(
             "{\\pard\\qc ",
             &format!(
-                "{{\\pard\\qc\\sa{} ",
-                (body_size * 0.8 * 20.0).round() as u32
+                "{{\\pard\\qc\\sb{}\\sa{} ",
+                twips(IMAGE_AROUND),
+                twips(IMAGE_AROUND)
             ),
         );
+        rtf = reader_block_rhythm(&rtf, twips);
         // Keep the heading hierarchy: a section heading (h3-h6) must not
         // match the size of a top-level one.
-        for (heading, scale, before) in [(64, 1.6, 1.5), (54, 1.35, 1.4), (46, 1.15, 1.25)] {
+        for (heading, scale, before) in [(64, 1.6, 2.1), (54, 1.35, 1.9), (46, 1.15, 1.7)] {
             rtf = rtf.replace(
                 &format!("\\b\\fs{heading}\\keepn"),
                 &format!(
@@ -2001,12 +2377,53 @@ pub mod native {
             }
             index = range.location + range.length.max(1);
         }
+        reader_image_paragraphs(&output);
         reader_text_blocks(
             &output,
             &super::rule_marker(&document.source_sha256),
             colors,
         );
         Ok(output.into_super())
+    }
+    /// Inserting an image attachment drops the paragraph style of its RTF
+    /// paragraph, so its centering and spacing were lost. Restore the style
+    /// from the paragraph's own line break. Reader only; magazine bytes keep
+    /// their established layout.
+    fn reader_image_paragraphs(output: &NSMutableAttributedString) {
+        let text = output.string();
+        let length = output.length();
+        let mut index = 0;
+        while index < length {
+            let mut range = NSRange::new(index, 1);
+            let attachment = unsafe {
+                output.attribute_atIndex_effectiveRange(
+                    NSAttachmentAttributeName,
+                    index,
+                    &mut range,
+                )
+            };
+            let end = range.location + range.length.max(1);
+            if attachment.is_some()
+                && end < length
+                && text.characterAtIndex(end) == u16::from(b'\n')
+                && let Some(style) = unsafe {
+                    output.attribute_atIndex_effectiveRange(
+                        NSParagraphStyleAttributeName,
+                        end,
+                        std::ptr::null_mut(),
+                    )
+                }
+            {
+                unsafe {
+                    output.addAttribute_value_range(
+                        NSParagraphStyleAttributeName,
+                        &style,
+                        NSRange::new(range.location, end - range.location),
+                    );
+                }
+            }
+            index = end;
+        }
     }
     /// Draw rules and quote bars as native text blocks; RTF import cannot express them.
     fn reader_text_blocks(
@@ -2529,6 +2946,7 @@ pub mod native {
         font_picker: Retained<NSPopUpButton>,
         _button_target: Retained<HeaderTarget>,
         bridge: Rc<ReaderBridge>,
+        media: Vec<Media>,
     }
     impl NativeRichView {
         /// # Safety
@@ -2645,6 +3063,7 @@ pub mod native {
                 font_picker,
                 _button_target: target,
                 bridge,
+                media: Vec::new(),
             };
             view.apply_appearance();
             Ok(view)
@@ -2742,6 +3161,7 @@ pub mod native {
             let document = RichDocument {
                 image_layouts: HashMap::new(),
                 image_links: HashMap::new(),
+                videos: Vec::new(),
                 source_sha256: String::new(),
                 blocks: vec![
                     super::Block::Paragraph {
@@ -2890,6 +3310,22 @@ pub mod native {
                 character = range.location + range.length.max(1);
             }
             let same_document = self.loaded_sha256.as_deref() == Some(&document.source_sha256);
+            let previous = std::mem::take(&mut self.media)
+                .into_iter()
+                .filter_map(|media| {
+                    if same_document {
+                        Some((media.key, media.view))
+                    } else {
+                        media.view.removeFromSuperview();
+                        None
+                    }
+                })
+                .collect();
+            let (attributed, media) = media_overlays(&attributed, &document.videos, previous);
+            for item in &media {
+                self.text.addSubview(&item.view);
+            }
+            self.media = media;
             let scroll_origin = self.scroll.contentView().bounds().origin;
             replace_text(&self.text, &attributed, same_document)?;
             *self.delegate.ivars().anchors.borrow_mut() =
@@ -2925,31 +3361,21 @@ pub mod native {
             let inset = ((width - 780.0) / 2.0).max(minimum_inset);
             let content_width = (width - inset * 2.0).max(80.0);
             self.document_view.ivars().inset.set(inset);
-            if let Some(storage) = unsafe { self.text.textStorage() } {
-                for (index, unit) in storage.string().to_string().encode_utf16().enumerate() {
-                    if unit == 0xfffc
-                        && let Some(object) = unsafe {
-                            storage.attribute_atIndex_effectiveRange(
-                                NSAttachmentAttributeName,
-                                index,
-                                std::ptr::null_mut(),
-                            )
-                        }
-                        && let Some(attachment) = object.downcast_ref::<NSTextAttachment>()
-                    {
-                        let bounds = attachment.bounds();
-                        let original = attachment
-                            .image()
-                            .map(|image| image.size())
-                            .unwrap_or(bounds.size);
-                        let available = (width - inset * 2.0).max(80.0);
-                        let factor = (available / original.width.max(1.0)).min(1.0);
-                        attachment.setBounds(NSRect::new(
-                            bounds.origin,
-                            NSSize::new(original.width * factor, original.height * factor),
-                        ));
-                    }
-                }
+            let placed = unsafe { self.text.textStorage() }
+                .map(|storage| attachments(&storage))
+                .unwrap_or_default();
+            let available = (width - inset * 2.0).max(80.0);
+            for (_, attachment) in &placed {
+                let bounds = attachment.bounds();
+                let original = attachment
+                    .image()
+                    .map(|image| image.size())
+                    .unwrap_or(bounds.size);
+                let factor = (available / original.width.max(1.0)).min(1.0);
+                attachment.setBounds(NSRect::new(
+                    bounds.origin,
+                    NSSize::new(original.width * factor, original.height * factor),
+                ));
             }
             let header_height = layout_text(&self.header_text, content_width);
             self.header_text.setFrameOrigin(NSPoint::new(inset, 38.0));
@@ -2991,6 +3417,31 @@ pub mod native {
             y += 25.0;
             let body_height = layout_text(&self.text, content_width);
             self.text.setFrameOrigin(NSPoint::new(inset, y));
+            if let (Some(manager), Some(container)) =
+                unsafe { (self.text.layoutManager(), self.text.textContainer()) }
+            {
+                let origin = self.text.textContainerOrigin();
+                for item in &self.media {
+                    let Some((index, _)) = placed
+                        .iter()
+                        .find(|(_, a)| std::ptr::eq(&**a, &*item.attachment))
+                    else {
+                        continue;
+                    };
+                    let glyphs = unsafe {
+                        manager.glyphRangeForCharacterRange_actualCharacterRange(
+                            NSRange::new(*index, 1),
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    let mut frame =
+                        manager.boundingRectForGlyphRange_inTextContainer(glyphs, &container);
+                    frame.origin.x += origin.x;
+                    frame.origin.y += origin.y;
+                    frame.size = item.attachment.bounds().size;
+                    item.view.setFrame(frame);
+                }
+            }
             self.document_view
                 .setFrameSize(NSSize::new(width, (y + body_height + 38.0).max(height)));
             self.document_view.setNeedsDisplay(true);
@@ -3013,6 +3464,13 @@ pub mod native {
                 return;
             }
             self.scroll.setHidden(!visible);
+            if !visible {
+                for item in &self.media {
+                    if let Some(web) = item.view.downcast_ref::<objc2_web_kit::WKWebView>() {
+                        unsafe { web.pauseAllMediaPlaybackWithCompletionHandler(None) };
+                    }
+                }
+            }
         }
         /// Give egui controls their native keyboard event destination. Merely
         /// setting an egui focus ID does not resign an AppKit text responder.
