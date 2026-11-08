@@ -25,6 +25,7 @@ id_type!(MagazineId);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scope {
     Inbox,
+    Favorites,
     Archive,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +164,8 @@ pub struct Article {
     pub saved_at: String,
     pub read_at: Option<String>,
     pub archived_at: Option<String>,
+    #[serde(default)]
+    pub favorited_at: Option<String>,
     pub deliberate: bool,
     pub excluded: bool,
     pub printed: u32,

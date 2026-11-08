@@ -136,6 +136,16 @@ pub fn initialize(connection: &Connection) -> anyhow::Result<()> {
         )?;
     }
     transaction.execute_batch("CREATE TABLE IF NOT EXISTS native_schema_migrations(version INTEGER PRIMARY KEY CHECK(version>0), applied_at TEXT NOT NULL DEFAULT(now())); INSERT OR IGNORE INTO native_schema_migrations(version) VALUES(1);")?;
+    // Native migration 3: favorites are a nullable timestamp, independent of
+    // read/archive state. Existing rows start unfavorited.
+    let favorites: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_schema_migrations WHERE version=3)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !favorites {
+        transaction.execute_batch("ALTER TABLE articles ADD COLUMN favorited_at TEXT; INSERT INTO native_schema_migrations(version) VALUES(3);")?;
+    }
     transaction.commit()?;
     if is_lean(connection)? {
         configure_lean(connection)?;

@@ -201,3 +201,97 @@ fn pagination_and_bulk_filter_count_are_stable() {
     assert_eq!(library::counts(&c).unwrap().all, 75);
     assert_eq!(library::delete_matching(&mut c, &q, 75).unwrap(), 75);
 }
+#[test]
+fn favorites_span_inbox_and_archive_without_changing_state() {
+    let mut c = db();
+    let mut save = |url: &str| {
+        library::save(&mut c, url, ArrivalKind::Web, url, "Saved", None, None)
+            .unwrap()
+            .0
+    };
+    let (inbox, archived, plain) = (
+        save("https://example.com/inbox"),
+        save("https://example.com/archived"),
+        save("https://example.com/plain"),
+    );
+    library::update(&c, &archived, None, Some(true)).unwrap();
+    library::favorite(&c, &inbox, true).unwrap();
+    library::favorite(&c, &archived, true).unwrap();
+    let favorites = Query::for_scope(Scope::Favorites);
+    let ids = |c: &rusqlite::Connection, q: &Query| {
+        let mut ids: Vec<_> = library::articles(c, q, 0)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        ids
+    };
+    let mut expected = vec![inbox.clone(), archived.clone()];
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    // Favorites ignores the read filter, like feed mode.
+    assert_eq!(ids(&c, &favorites), expected);
+    assert_eq!(library::matching_count(&c, &favorites).unwrap(), 2);
+    let inbox_unread = ids(&c, &Query::for_scope(Scope::Inbox));
+    assert!(inbox_unread.contains(&inbox) && inbox_unread.contains(&plain));
+    let stamped = library::metadata(&c, &archived).unwrap();
+    assert!(stamped.favorited_at.is_some() && stamped.archived_at.is_some());
+    // Re-favoriting keeps the original stamp; unfavoriting leaves read/archive alone.
+    library::favorite(&c, &archived, true).unwrap();
+    assert_eq!(
+        library::metadata(&c, &archived).unwrap().favorited_at,
+        stamped.favorited_at
+    );
+    library::favorite(&c, &inbox, false).unwrap();
+    assert_eq!(ids(&c, &favorites), vec![archived.clone()]);
+    let a = library::metadata(&c, &inbox).unwrap();
+    assert!(a.favorited_at.is_none() && a.archived_at.is_none() && a.read_at.is_none());
+    // A deleted favorite leaves the list and a deliberate re-save starts fresh.
+    library::delete(&mut c, std::slice::from_ref(&archived)).unwrap();
+    assert!(ids(&c, &favorites).is_empty());
+    assert!(library::favorite(&c, &archived, true).is_err());
+    library::save(
+        &mut c,
+        "https://example.com/archived",
+        ArrivalKind::Web,
+        "again",
+        "Saved",
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        library::metadata(&c, &archived)
+            .unwrap()
+            .favorited_at
+            .is_none()
+    );
+}
+#[test]
+fn favorites_migration_upgrades_existing_library_once() {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    db_compat::register(&c).unwrap();
+    // A pre-favorites library: baseline schema and native migration 1 only.
+    c.execute_batch(include_str!("../schema/web-001.sql"))
+        .unwrap();
+    c.execute_batch("INSERT INTO users(id,email) VALUES('00000000-0000-4000-8000-000000000001','local@reading-list.invalid'); CREATE TABLE native_schema_migrations(version INTEGER PRIMARY KEY CHECK(version>0), applied_at TEXT NOT NULL DEFAULT(now())); INSERT INTO native_schema_migrations(version) VALUES(1); INSERT INTO articles(id,user_id,url,title,site,archived_at) VALUES('old','00000000-0000-4000-8000-000000000001','https://example.com/old','Old','example.com',now());").unwrap();
+    db_compat::initialize(&c).unwrap();
+    db_compat::initialize(&c).unwrap();
+    let old = library::metadata(&c, &ArticleId("old".into())).unwrap();
+    assert!(old.favorited_at.is_none() && old.archived_at.is_some());
+    let versions: i64 = c
+        .query_row(
+            "SELECT count(*) FROM native_schema_migrations WHERE version=3",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(versions, 1);
+    library::favorite(&c, &old.id, true).unwrap();
+    assert_eq!(
+        library::articles(&c, &Query::for_scope(Scope::Favorites), 0)
+            .unwrap()
+            .len(),
+        1
+    );
+}

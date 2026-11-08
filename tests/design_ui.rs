@@ -155,6 +155,7 @@ fn article(id: &str, title: &str) -> Article {
         saved_at: "2026-10-21T10:00:00Z".into(),
         read_at: None,
         archived_at: None,
+        favorited_at: None,
         deliberate: true,
         excluded: false,
         printed: 0,

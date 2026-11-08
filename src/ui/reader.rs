@@ -60,6 +60,10 @@ pub fn draw(ui: &mut Ui, view: ReaderView<'_>, actions: &mut Vec<Action>) -> Rea
                             if controls::toolbar_button(ui, Icon::Trash, "Delete article", false).clicked() {
                                 actions.push(Action::ConfirmDelete(vec![a.id.clone()]));
                             }
+                            let favorited = a.favorited_at.is_some();
+                            if controls::toolbar_button(ui, Icon::Star, if favorited { "Remove from Favorites" } else { "Add to Favorites" }, favorited).clicked() {
+                                actions.push(Action::Command(Command::Favorite { id: a.id.clone(), favorited: !favorited }));
+                            }
                             let archived = a.archived_at.is_some();
                             if controls::toolbar_button(ui, Icon::Archive, if archived { "Restore to Inbox" } else { "Archive" }, archived).clicked() {
                                 actions.push(Action::Command(Command::Archive { id: a.id.clone(), archived: !archived }));

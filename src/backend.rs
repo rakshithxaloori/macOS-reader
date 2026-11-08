@@ -74,6 +74,10 @@ pub enum Command {
         id: ArticleId,
         archived: bool,
     },
+    Favorite {
+        id: ArticleId,
+        favorited: bool,
+    },
     Delete(Vec<ArticleId>),
     DeleteMatching {
         query: Query,
@@ -508,6 +512,10 @@ fn dispatch(c: &mut rusqlite::Connection, cmd: Command) -> anyhow::Result<Vec<Ev
         }
         Command::Archive { id, archived } => {
             library::update(c, &id, None, Some(archived))?;
+            Event::Changed
+        }
+        Command::Favorite { id, favorited } => {
+            library::favorite(c, &id, favorited)?;
             Event::Changed
         }
         Command::Delete(ids) => {

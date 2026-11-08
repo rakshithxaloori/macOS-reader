@@ -3,8 +3,8 @@ use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 const FILTER: &str = "a.user_id=?1 AND a.deleted_at IS NULL
-AND (?7<>'' OR CASE WHEN ?2='archive' THEN a.archived_at IS NOT NULL ELSE a.archived_at IS NULL END)
-AND (?7<>'' OR CASE WHEN ?3='unread' THEN a.read_at IS NULL ELSE a.read_at IS NOT NULL END)
+AND (?7<>'' OR CASE ?2 WHEN 'archive' THEN a.archived_at IS NOT NULL WHEN 'favorites' THEN a.favorited_at IS NOT NULL ELSE a.archived_at IS NULL END)
+AND (?7<>'' OR ?2='favorites' OR CASE WHEN ?3='unread' THEN a.read_at IS NULL ELSE a.read_at IS NOT NULL END)
 AND (?7='' OR EXISTS(SELECT 1 FROM sources f WHERE f.user_id=a.user_id AND f.article_id=a.id AND f.kind='rss' AND substr(f.source_key,1,length(?7)+1)=?7||':'))
 AND (?4='' OR instr(lower(a.title || ' ' || coalesce(a.author,'') || ' ' || a.url || ' ' || a.site || ' ' || a.excerpt),lower(?4))>0)
 AND (?5='' OR publication_hostname(a.url)=?5)
@@ -13,7 +13,7 @@ const COLUMNS: &str = "a.id,a.url,a.title,a.author,a.site,a.excerpt,a.word_count
 EXISTS(SELECT 1 FROM sources s WHERE s.user_id=a.user_id AND s.article_id=a.id AND s.kind<>'rss'),
 EXISTS(SELECT 1 FROM magazine_exclusions e WHERE e.user_id=a.user_id AND e.article_id=a.id),
 (SELECT count(*) FROM magazine_articles s JOIN magazines m ON m.id=s.magazine_id WHERE s.user_id=a.user_id AND s.article_id=a.id AND m.finalized_at IS NOT NULL),
-(SELECT count(*) FROM magazine_articles s JOIN magazines m ON m.id=s.magazine_id WHERE s.user_id=a.user_id AND s.article_id=a.id AND m.finalized_at IS NULL),a.logo_url";
+(SELECT count(*) FROM magazine_articles s JOIN magazines m ON m.id=s.magazine_id WHERE s.user_id=a.user_id AND s.article_id=a.id AND m.finalized_at IS NULL),a.logo_url,a.favorited_at";
 /// Reserve write amplification before a durable mutation. In-memory synthetic
 /// databases have no managed disk files; file-backed lean databases share one owner.
 pub fn reserve_write(c: &Connection, bytes: u64) -> Result<Option<crate::storage::Reservation>> {
@@ -55,15 +55,16 @@ fn article_row(r: &Row<'_>) -> rusqlite::Result<Article> {
         printed: r.get(15)?,
         drafted: r.get(16)?,
         logo_url: r.get(17)?,
+        favorited_at: r.get(18)?,
     })
 }
 fn query_values(q: &Query) -> [String; 7] {
     [
         OWNER.into(),
-        if q.scope == Scope::Archive {
-            "archive"
-        } else {
-            "active"
+        match q.scope {
+            Scope::Inbox => "active",
+            Scope::Favorites => "favorites",
+            Scope::Archive => "archive",
         }
         .into(),
         if q.read == ReadFilter::Read {
@@ -188,7 +189,7 @@ pub fn save_in_transaction(
         |r| r.get(0),
     )?);
     let restored = if kind == ArrivalKind::Web || kind == ArrivalKind::WhatsApp {
-        tx.execute("UPDATE articles SET deleted_at=NULL,read_at=NULL,archived_at=NULL,status='pending',saved_at=now() WHERE user_id=?1 AND id=?2 AND deleted_at IS NOT NULL AND (?3='web' OR NOT EXISTS(SELECT 1 FROM sources WHERE user_id=?1 AND kind=?3 AND source_key=?4))",params![OWNER,id.0,kind.as_str(),key])?>0
+        tx.execute("UPDATE articles SET deleted_at=NULL,read_at=NULL,archived_at=NULL,favorited_at=NULL,status='pending',saved_at=now() WHERE user_id=?1 AND id=?2 AND deleted_at IS NOT NULL AND (?3='web' OR NOT EXISTS(SELECT 1 FROM sources WHERE user_id=?1 AND kind=?3 AND source_key=?4))",params![OWNER,id.0,kind.as_str(),key])?>0
     } else {
         false
     };
@@ -218,6 +219,12 @@ pub fn update(
         tx.execute("DELETE FROM article_media AS media WHERE user_id=?1 AND article_id=?2 AND NOT EXISTS(SELECT 1 FROM magazine_articles s WHERE s.user_id=?1 AND instr(s.html,media.id)>0)",params![OWNER,id.0])?;
     }
     tx.commit()?;
+    Ok(())
+}
+/// Favoriting only stamps `favorited_at`; read, archive and cache stay untouched.
+pub fn favorite(c: &Connection, id: &ArticleId, favorited: bool) -> Result<()> {
+    let _reservation = reserve_write(c, 131_072)?;
+    ensure!(c.execute("UPDATE articles SET favorited_at=CASE WHEN ?3 THEN COALESCE(favorited_at,now()) ELSE NULL END WHERE user_id=?1 AND id=?2 AND deleted_at IS NULL",params![OWNER,id.0,favorited])?==1,"Article not found");
     Ok(())
 }
 pub fn delete(c: &mut Connection, ids: &[ArticleId]) -> Result<usize> {

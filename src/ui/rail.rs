@@ -64,6 +64,7 @@ pub fn draw(ui: &mut Ui, current: View, actions: &mut Vec<Action>) {
                 ui.add_space(20.);
                 for (view, symbol) in [
                     (View::Inbox, Icon::Inbox),
+                    (View::Favorites, Icon::Star),
                     (View::Archive, Icon::Archive),
                     (View::Feeds, Icon::Rss),
                     (View::Magazines, Icon::Newspaper),
