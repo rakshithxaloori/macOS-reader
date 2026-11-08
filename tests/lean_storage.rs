@@ -93,6 +93,28 @@ fn cache_is_bounded_by_its_own_lru() {
 }
 
 #[test]
+fn batched_reads_share_one_index_write_and_owners_never_rewrite_it() {
+    use std::os::unix::fs::MetadataExt;
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::new(directory.path(), 45_000_000).unwrap();
+    for id in ["a", "b"] {
+        assert!(storage.cache_put(id, 0, false, article(1000)).unwrap());
+    }
+    let index = directory.path().join("article-cache-index.json");
+    let inode = || fs::metadata(&index).unwrap().ino();
+    let written = inode();
+    Storage::new(directory.path(), 45_000_000).unwrap();
+    assert_eq!(inode(), written, "an unchanged index is not rewritten");
+    let copies = storage.cache_get_many(&["a", "missing", "b"]).unwrap();
+    assert!(copies[0].is_some() && copies[1].is_none() && copies[2].is_some());
+    assert_eq!(copies[2].as_ref().unwrap().media[0].bytes, vec![7; 1000]);
+    let touched = inode();
+    assert_ne!(touched, written, "hits record their LRU touch");
+    assert!(storage.cache_get_many(&["missing"]).unwrap()[0].is_none());
+    assert_eq!(inode(), touched, "a pure miss writes nothing");
+}
+
+#[test]
 fn expiry_and_interrupted_cache_writes_are_reclaimed_at_restart() {
     let directory = tempfile::tempdir().unwrap();
     let storage = Storage::new(directory.path(), 45_000_000).unwrap();

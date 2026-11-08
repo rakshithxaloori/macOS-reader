@@ -89,14 +89,12 @@ fn validate(bytes: &[u8]) -> Result<String> {
     reader.decode()?;
     Ok(mime.into())
 }
-fn cached(storage: &Storage, key: &str) -> Result<Option<Vec<u8>>> {
-    Ok(storage
-        .cache_get(key)?
-        .filter(|copy| copy.html.is_empty() && copy.media.len() == 1)
+fn logo(copy: Option<CachedArticle>) -> Option<Vec<u8>> {
+    copy.filter(|copy| copy.html.is_empty() && copy.media.len() == 1)
         .and_then(|mut copy| {
             let media = copy.media.remove(0);
             validate(&media.bytes).ok().map(|_| media.bytes)
-        }))
+        })
 }
 pub fn cached_logos(
     connection: &rusqlite::Connection,
@@ -105,15 +103,14 @@ pub fn cached_logos(
     if crate::storage::database_path(connection)?.is_none() {
         return Ok(vec![]);
     }
-    let storage = Storage::for_database(connection)?;
-    let mut logos = Vec::new();
-    for request in requests(articles) {
-        let key = request.key();
-        if let Some(bytes) = cached(&storage, &key)? {
-            logos.push((key, bytes));
-        }
-    }
-    Ok(logos)
+    let keys: Vec<_> = requests(articles).iter().map(Request::key).collect();
+    let keys: Vec<_> = keys.iter().map(String::as_str).collect();
+    let copies = Storage::for_database(connection)?.cache_get_many(&keys)?;
+    Ok(keys
+        .into_iter()
+        .zip(copies)
+        .filter_map(|(key, copy)| Some((key.to_owned(), logo(copy)?)))
+        .collect())
 }
 pub async fn acquire(
     storage: &Storage,
@@ -122,7 +119,7 @@ pub async fn acquire(
     offline: bool,
 ) -> Result<Option<Vec<u8>>> {
     let key = request.key();
-    if let Some(bytes) = cached(storage, &key)? {
+    if let Some(bytes) = logo(storage.cache_get(&key)?) {
         return Ok(Some(bytes));
     }
     if offline {
