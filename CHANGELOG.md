@@ -7,6 +7,8 @@ version for fixes. Each release is a `vX.Y.Z` tag on `main`.
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-11-08
+
 ### Changed
 - A saved PDF link shows a Text | PDF switch in the reader toolbar. PDF shows
   the original document in place, inside the reader, instead of the
