@@ -107,6 +107,8 @@ pub struct App {
     notice: String,
     quit: bool,
     pdfs: Vec<PdfWindow>,
+    /// The reader shows a PDF link's original instead of its text (this session).
+    pdf_mode: bool,
     runtime: tokio::runtime::Runtime,
     whatsapp: Option<WhatsAppHandle>,
     whatsapp_events: tokio::sync::mpsc::Receiver<WhatsAppEvent>,
@@ -233,6 +235,7 @@ impl App {
             notice: String::new(),
             quit: false,
             pdfs: vec![],
+            pdf_mode: false,
             runtime,
             whatsapp,
             whatsapp_events,
@@ -830,6 +833,7 @@ impl App {
                 }
             }
             Action::Open(id) => self.open(id),
+            Action::PdfMode(on) => self.pdf_mode = on,
             Action::OpenArticlePdf => {
                 if let Some(body) = &self.selected
                     && let Some(bytes) = body.pdf()
@@ -1544,6 +1548,7 @@ impl eframe::App for App {
                                 .selected
                                 .as_ref()
                                 .is_some_and(|body| body.pdf().is_some()),
+                            pdf_mode: self.pdf_mode,
                             native: self.native_reader.is_some(),
                         },
                         &mut actions,
@@ -1598,6 +1603,15 @@ impl eframe::App for App {
                 });
         }
         if let Some(view) = &self.native_reader {
+            let pdf = self
+                .selected
+                .as_ref()
+                .filter(|_| self.pdf_mode && !self.body_loading)
+                .and_then(|body| Some((body.article.id.0.as_str(), body.pdf()?)));
+            if let Err(error) = view.set_pdf(pdf) {
+                self.error = error;
+                self.pdf_mode = false;
+            }
             view.set_visible(show_native);
             view.set_font_picker_rect(
                 font_picker_rect.filter(|_| self.dialog.is_none()),

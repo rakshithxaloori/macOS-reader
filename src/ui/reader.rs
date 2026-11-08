@@ -17,6 +17,8 @@ pub struct ReaderView<'a> {
     pub error: Option<&'a str>,
     pub has_copy: bool,
     pub pdf: bool,
+    /// Showing the original PDF in place of the extracted text.
+    pub pdf_mode: bool,
     pub fetched_at: Option<&'a str>,
     pub local_copy: bool,
     pub saving_copy: bool,
@@ -42,6 +44,7 @@ pub fn draw(ui: &mut Ui, view: ReaderView<'_>, actions: &mut Vec<Action>) -> Rea
         error,
         has_copy,
         pdf,
+        pdf_mode,
         fetched_at,
         local_copy,
         saving_copy,
@@ -58,12 +61,18 @@ pub fn draw(ui: &mut Ui, view: ReaderView<'_>, actions: &mut Vec<Action>) -> Rea
             ui.scope_builder(egui::UiBuilder::new().max_rect(toolbar.shrink2(egui::vec2(20., 11.))), |ui| {
                 ui.horizontal(|ui| {
                     if controls::toolbar_button(ui, Icon::ArrowLeft, "Close article", false).clicked() { actions.push(Action::CloseReader); }
+                    if pdf && native {
+                        ui.add_space(6.);
+                        if let Some(choice) = controls::segmented(ui, &["Text", "PDF"], usize::from(pdf_mode)) {
+                            actions.push(Action::PdfMode(choice == 1));
+                        }
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(a) = article {
                             if controls::toolbar_button(ui, Icon::External, "Open original article", false).clicked() {
                                 ui.ctx().open_url(egui::OpenUrl::new_tab(&a.url));
                             }
-                            if pdf && controls::toolbar_button(ui, Icon::Book, "Open PDF", false).clicked() {
+                            if pdf && (pdf_mode || !native) && controls::toolbar_button(ui, Icon::Book, "Open PDF in a window", false).clicked() {
                                 actions.push(Action::OpenArticlePdf);
                             }
                             if controls::toolbar_button(ui, Icon::Trash, "Delete article", false).clicked() {

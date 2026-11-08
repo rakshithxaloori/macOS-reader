@@ -1489,6 +1489,16 @@ pub mod native {
                 children.push(view.retain());
             }
         });
+        if let Some(scroll) = native_scroll(view)
+            && let Some(parent) = unsafe { scroll.superview() }
+        {
+            // The in-reader PDF original, when it replaces the text body.
+            for child in parent.subviews().iter() {
+                if !child.isHidden() && child.downcast_ref::<objc2_pdf_kit::PDFView>().is_some() {
+                    children.push(child.retain());
+                }
+            }
+        }
         children
     }
     extern "C-unwind" fn composite_children(view: &AnyObject, _: Sel) -> *mut NSArray<AnyObject> {
@@ -2947,6 +2957,10 @@ pub mod native {
         _button_target: Retained<HeaderTarget>,
         bridge: Rc<ReaderBridge>,
         media: Vec<Media>,
+        /// The exact cached PDF of a PDF link, shown in place of the text body.
+        pdf: Retained<objc2_pdf_kit::PDFView>,
+        pdf_key: std::cell::RefCell<Option<String>>,
+        visible: std::cell::Cell<bool>,
     }
     impl NativeRichView {
         /// # Safety
@@ -3031,6 +3045,12 @@ pub mod native {
                 return Err("Native reader must attach to the original Winit content view".into());
             }
             attach_accessibility(&parent, &scroll)?;
+            let pdf = unsafe {
+                objc2_pdf_kit::PDFView::initWithFrame(objc2_pdf_kit::PDFView::alloc(mtm), bounds)
+            };
+            pdf.setHidden(true);
+            unsafe { pdf.setAutoScales(true) };
+            parent.addSubview(&pdf);
             parent.addSubview(&scroll);
             parent.addSubview(&font_picker);
             NATIVE_PICKERS.with(|pickers| {
@@ -3064,6 +3084,9 @@ pub mod native {
                 _button_target: target,
                 bridge,
                 media: Vec::new(),
+                pdf,
+                pdf_key: Default::default(),
+                visible: Default::default(),
             };
             view.apply_appearance();
             Ok(view)
@@ -3085,6 +3108,8 @@ pub mod native {
             });
             let appearance = NSAppearance::appearanceNamed(&appearance_name);
             self.scroll.setAppearance(appearance.as_deref());
+            self.pdf.setAppearance(appearance.as_deref());
+            unsafe { self.pdf.setBackgroundColor(&native_color(colors.sidebar)) };
             self.font_picker.setAppearance(appearance.as_deref());
             self.font_picker
                 .setContentTintColor(Some(&native_color(colors.ink)));
@@ -3355,8 +3380,9 @@ pub mod native {
             } else {
                 bounds.size.height - f64::from(rect.max.y) * scale
             };
-            self.scroll
-                .setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(width, height)));
+            let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
+            self.scroll.setFrame(frame);
+            self.pdf.setFrame(frame);
             let minimum_inset = if width > 700.0 { 76.0 } else { 28.0 };
             let inset = ((width - 780.0) / 2.0).max(minimum_inset);
             let content_width = (width - inset * 2.0).max(80.0);
@@ -3446,7 +3472,37 @@ pub mod native {
                 .setFrameSize(NSSize::new(width, (y + body_height + 38.0).max(height)));
             self.document_view.setNeedsDisplay(true);
         }
+        /// Show the exact PDF bytes (keyed by article) in place of the text
+        /// body, or `None` for the extracted text. Neither copy is changed.
+        pub fn set_pdf(&self, pdf: Option<(&str, &[u8])>) -> Result<(), String> {
+            let key = pdf.map(|(key, bytes)| format!("{key}:{}", bytes.len()));
+            if *self.pdf_key.borrow() == key {
+                return Ok(());
+            }
+            *self.pdf_key.borrow_mut() = None;
+            unsafe { self.pdf.setDocument(None) };
+            if let Some((_, bytes)) = pdf {
+                let data = NSData::with_bytes(bytes);
+                let document = unsafe {
+                    objc2_pdf_kit::PDFDocument::initWithData(
+                        objc2_pdf_kit::PDFDocument::alloc(),
+                        &data,
+                    )
+                }
+                .ok_or("The PDF could not be decoded")?;
+                unsafe { self.pdf.setDocument(Some(&document)) };
+                *self.pdf_key.borrow_mut() = key;
+            }
+            self.set_visible(self.visible.get());
+            Ok(())
+        }
         pub fn set_visible(&self, visible: bool) {
+            self.visible.set(visible);
+            let pdf = self.pdf_key.borrow().is_some();
+            if self.pdf.isHidden() == (visible && pdf) {
+                self.pdf.setHidden(!(visible && pdf));
+            }
+            let visible = visible && !pdf;
             // Hiding NSTextView may first move its responder to NSWindow.
             // Hand control to Winit before AppKit performs that transition,
             // including subsequent frames where the reader is already hidden.
@@ -3524,6 +3580,7 @@ pub mod native {
             });
             self.font_picker.removeFromSuperview();
             self.scroll.removeFromSuperview();
+            self.pdf.removeFromSuperview();
         }
     }
 }
