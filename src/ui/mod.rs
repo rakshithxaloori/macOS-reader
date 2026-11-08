@@ -50,6 +50,8 @@ pub enum Action {
     Open(ArticleId),
     CloseReader,
     OpenArticlePdf,
+    /// Show the original PDF (true) or the extracted text in the reader.
+    PdfMode(bool),
     Query(Query),
     LoadMore,
     Command(Command),

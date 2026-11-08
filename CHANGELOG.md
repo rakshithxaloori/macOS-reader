@@ -7,6 +7,12 @@ version for fixes. Each release is a `vX.Y.Z` tag on `main`.
 
 ## [Unreleased]
 
+### Changed
+- A saved PDF link shows a Text | PDF switch in the reader toolbar. PDF shows
+  the original document in place, inside the reader, instead of the
+  extracted text; Text goes back. The choice holds for the session, and the
+  book button still opens the PDF in its own window.
+
 ## [0.3.6] - 2026-11-08
 
 ### Added
