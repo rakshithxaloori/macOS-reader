@@ -353,11 +353,15 @@ impl Backend {
                             if let Event::List {
                                 generation,
                                 articles,
+                                logos,
                                 ..
                             } = &mut event
                                 && db_compat::is_lean(&c).unwrap_or(false)
                             {
-                                let requests = crate::icons::requests(articles);
+                                // Icons already read from the cache need no
+                                // second cache read on the icon thread.
+                                let mut requests = crate::icons::requests(articles);
+                                requests.retain(|r| !logos.iter().any(|(key, _)| *key == r.key()));
                                 for article in articles {
                                     article.logo_url = crate::icons::identity(article);
                                 }

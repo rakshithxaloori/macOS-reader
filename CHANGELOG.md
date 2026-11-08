@@ -7,6 +7,17 @@ version for fixes. Each release is a `vX.Y.Z` tag on `main`.
 
 ## [Unreleased]
 
+### Fixed
+- Articles open quickly after a restart. The article cache parsed and wrote
+  its JSON one byte per system call, so opening a large cached article made
+  millions of reads. Every list load also read each publication icon from the
+  cache one at a time, rewriting the cache index with two full disk flushes
+  per icon, then the icon worker read them all again, and every storage owner
+  rewrote the unchanged index on creation. Opening an article waited behind
+  that work. Cache files are now read and written whole, icons are read in one
+  pass with one index write and not read twice, and an unchanged index is
+  never rewritten.
+
 ## [0.3.5] - 2026-11-05
 
 ### Added
