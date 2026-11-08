@@ -17,8 +17,11 @@ version for fixes. Each release is a `vX.Y.Z` tag on `main`.
 - Animated GIFs play in the reader, and YouTube, Vimeo and direct
   mp4/m4v/mov/webm video embeds play inline. Players pause when the reader is
   hidden, and the article keeps scrolling with the pointer over a video.
+- Save a local copy of an article from the reader toolbar so it stays readable
+  offline; it is never evicted and can be removed again.
 
 ### Changed
+- The reader's text style and size controls sit behind an "Aa" button.
 - The library database gains a `favorited_at` column (schema version 3),
   applied automatically on first launch; existing articles start unfavorited.
 

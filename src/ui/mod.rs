@@ -77,6 +77,8 @@ pub enum Action {
     Group(bool),
     DraftDialog,
     FontSize(f32),
+    SaveLocalCopy(ArticleId),
+    RemoveLocalCopy(ArticleId),
     ReaderFont(crate::reader_style::ReaderFont),
     Appearance(crate::theme::Appearance),
     WhatsAppConnect(String),
