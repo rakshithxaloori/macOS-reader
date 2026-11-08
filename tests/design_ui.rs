@@ -397,6 +397,7 @@ fn reader_frame(
                     .document
                     .as_ref()
                     .is_some_and(|document| !document.blocks.is_empty()),
+                pdf: false,
                 native,
                 fetched_at: Some("2026-10-21T10:00:00Z"),
                 local_copy: false,
@@ -642,6 +643,7 @@ fn reader_error_details_preserve_the_available_copy_and_report_exact_failure() {
                     loading: false,
                     error: Some(error),
                     has_copy,
+                    pdf: false,
                     fetched_at: None,
                     local_copy: false,
                     saving_copy: false,

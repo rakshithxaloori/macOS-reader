@@ -19,6 +19,11 @@ version for fixes. Each release is a `vX.Y.Z` tag on `main`.
   hidden, and the article keeps scrolling with the pointer over a video.
 - Save a local copy of an article from the reader toolbar so it stays readable
   offline; it is never evicted and can be removed again.
+- Links to PDFs can be saved, from the app or from WhatsApp "save" messages.
+  The reader shows the PDF's text as reflowed prose (title, author, reading
+  time and search come from it), and the toolbar's book button opens the exact
+  PDF pages in the PDF viewer. PDFs up to 15 MB are kept in the article cache;
+  a PDF with no selectable text shows a notice and still opens in the viewer.
 
 ### Changed
 - The reader's text style and size controls sit behind an "Aa" button.

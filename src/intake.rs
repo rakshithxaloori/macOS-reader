@@ -955,10 +955,12 @@ async fn run_claimed(
                 .optional()?;
             let Some(url) = url else { return Ok(None) };
             let resource = fetcher.fetch(&url, false).await?;
-            let source = std::str::from_utf8(&resource.body)
-                .context("Publisher page must use UTF-8 encoding")?;
-            let copy =
-                extraction::extract(source, resource.url.as_str()).map_err(anyhow::Error::msg)?;
+            let copy = extraction::extract_response(
+                &resource.body,
+                &resource.content_type,
+                resource.url.as_str(),
+            )
+            .map_err(anyhow::Error::msg)?;
             if db_compat::is_lean(c)? {
                 persist_metadata(c, lease, job, &copy)
             } else {

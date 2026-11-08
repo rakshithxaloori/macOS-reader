@@ -189,6 +189,15 @@ pub struct ArticleBody {
     pub html: String,
     pub media: Vec<(String, Vec<u8>)>,
 }
+impl ArticleBody {
+    /// The exact bytes of a saved PDF link, kept beside its reflowed prose.
+    pub fn pdf(&self) -> Option<&[u8]> {
+        self.media
+            .iter()
+            .map(|(_, bytes)| bytes.as_slice())
+            .find(|bytes| bytes.starts_with(b"%PDF-"))
+    }
+}
 #[derive(Clone, Debug)]
 pub struct Feed {
     pub id: FeedId,
