@@ -14,6 +14,7 @@ pub const TITLEBAR_INSET: f32 = 28.;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
     Inbox,
+    Favorites,
     Archive,
     Feeds,
     Magazines,
@@ -21,9 +22,20 @@ pub enum View {
     ImportExport,
 }
 impl View {
+    /// The article list a view shows, if it is a library list.
+    pub fn scope(self) -> Option<crate::domain::Scope> {
+        use crate::domain::Scope;
+        match self {
+            Self::Inbox => Some(Scope::Inbox),
+            Self::Favorites => Some(Scope::Favorites),
+            Self::Archive => Some(Scope::Archive),
+            _ => None,
+        }
+    }
     pub fn label(self) -> &'static str {
         match self {
             Self::Inbox => "Inbox",
+            Self::Favorites => "Favorites",
             Self::Archive => "Archive",
             Self::Feeds => "Your feeds",
             Self::Magazines => "Magazines",

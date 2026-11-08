@@ -164,9 +164,10 @@ pub fn export(c: &Connection, path: &Path) -> Result<()> {
             "archived",
             "read_at",
             "archived_at",
+            "favorited_at",
             "status",
         ])?;
-        let mut statement=snapshot.prepare("SELECT id,url,title,author,site,html,excerpt,word_count,status,error,published_at,saved_at,read_at,archived_at FROM articles WHERE user_id=?1 AND deleted_at IS NULL ORDER BY id")?;
+        let mut statement=snapshot.prepare("SELECT id,url,title,author,site,html,excerpt,word_count,status,error,published_at,saved_at,read_at,archived_at,favorited_at FROM articles WHERE user_id=?1 AND deleted_at IS NULL ORDER BY id")?;
         let names: Vec<String> = statement
             .column_names()
             .into_iter()
@@ -213,6 +214,7 @@ pub fn export(c: &Connection, path: &Path) -> Result<()> {
                 "archived",
                 "read_at",
                 "archived_at",
+                "favorited_at",
                 "status",
             ] {
                 let v = &a[name];

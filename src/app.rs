@@ -262,12 +262,12 @@ impl App {
         app.refresh();
         app
     }
+    /// The list scope of the current view; non-list views keep the Inbox query.
+    fn scope(&self) -> Scope {
+        self.view.scope().unwrap_or(Scope::Inbox)
+    }
     fn query(&self) -> &Query {
-        if self.view == View::Archive {
-            &self.settings.archive
-        } else {
-            &self.settings.inbox
-        }
+        self.settings.query(self.scope())
     }
     fn send(&mut self, c: Command) {
         if let Command::Refetch(id) = &c
@@ -330,12 +330,7 @@ impl App {
             ReloadStep::List => {
                 self.generation += 1;
                 self.loading = true;
-                let loaded = if self.view == View::Archive {
-                    self.settings.archive_loaded
-                } else {
-                    self.settings.inbox_loaded
-                }
-                .max(60);
+                let loaded = (*self.settings.list(self.scope()).loaded).max(60);
                 Command::Reconcile {
                     generation: self.generation,
                     query: self.query().clone(),
@@ -597,11 +592,7 @@ impl App {
                                 }
                             }
                         }
-                        if self.view == View::Archive {
-                            self.settings.archive_loaded = self.rows.len() as u32;
-                        } else {
-                            self.settings.inbox_loaded = self.rows.len() as u32;
-                        }
+                        *self.settings.list(self.scope()).loaded = self.rows.len() as u32;
                         self.loading = false;
                     }
                 }
@@ -618,6 +609,7 @@ impl App {
                         {
                             body.article.read_at = selected.article.read_at.clone();
                             body.article.archived_at = selected.article.archived_at.clone();
+                            body.article.favorited_at = selected.article.favorited_at.clone();
                         }
                         self.reader.set_html(&body.html);
                         for (id, bytes) in &body.media {
@@ -805,7 +797,7 @@ impl App {
                 self.selected = None;
                 self.body_generation += 1;
                 self.send(Command::CancelBody);
-                if matches!(v, View::Inbox | View::Archive) {
+                if v.scope().is_some() {
                     self.refresh();
                 } else {
                     self.send(Command::Summary);
@@ -824,15 +816,10 @@ impl App {
                 self.send(Command::CancelBody);
             }
             Action::Query(q) => {
-                if q.scope == Scope::Archive {
-                    self.settings.archive = q;
-                    self.settings.archive_scroll = 0.;
-                    self.settings.archive_loaded = 60;
-                } else {
-                    self.settings.inbox = q;
-                    self.settings.inbox_scroll = 0.;
-                    self.settings.inbox_loaded = 60;
-                }
+                let list = self.settings.list(q.scope);
+                *list.query = q;
+                *list.scroll = 0.;
+                *list.loaded = 60;
                 self.rows.clear();
                 self.refresh();
             }
@@ -946,15 +933,10 @@ impl App {
                 }
             }
             Action::Group(grouped) => {
-                if self.view == View::Archive {
-                    self.settings.archive_grouped = grouped;
-                    self.settings.archive_scroll = 0.;
-                    self.settings.archive.publication.clear();
-                } else {
-                    self.settings.inbox_grouped = grouped;
-                    self.settings.inbox_scroll = 0.;
-                    self.settings.inbox.publication.clear();
-                }
+                let list = self.settings.list(self.scope());
+                *list.grouped = grouped;
+                *list.scroll = 0.;
+                list.query.publication.clear();
                 self.refresh();
             }
             Action::ConfirmDeleteMatching { query, expected } => {
@@ -1153,6 +1135,7 @@ impl eframe::App for App {
                 M::Save => Action::SaveDialog,
                 M::Feed => Action::FeedDialog,
                 M::Inbox => Action::Navigate(View::Inbox),
+                M::Favorites => Action::Navigate(View::Favorites),
                 M::Archive => Action::Navigate(View::Archive),
                 M::Feeds => Action::Navigate(View::Feeds),
                 M::Magazines => Action::Navigate(View::Magazines),
@@ -1441,17 +1424,14 @@ impl eframe::App for App {
             .resizable(false)
             .frame(egui::Frame::NONE.fill(colors.sidebar))
             .show(ui, |ui| ui::rail::draw(ui, self.view, &mut actions));
-        if matches!(self.view, View::Inbox | View::Archive) {
+        if let Some(scope) = self.view.scope() {
             let width = if ui.available_width() + 64. < 1100. {
                 300.
             } else {
                 340.
             };
-            let scroll = if self.view == View::Archive {
-                self.settings.archive_scroll
-            } else {
-                self.settings.inbox_scroll
-            };
+            let list = self.settings.list(scope);
+            let (scroll, grouped) = (*list.scroll, *list.grouped);
             let mut new_scroll = scroll;
             egui::Panel::left("articles")
                 .exact_size(width)
@@ -1466,11 +1446,7 @@ impl eframe::App for App {
                             rows: &self.rows,
                             total: self.matching_count,
                             library_total: self.counts.all,
-                            grouped: if self.view == View::Archive {
-                                self.settings.archive_grouped
-                            } else {
-                                self.settings.inbox_grouped
-                            },
+                            grouped,
                             logos: &self.logos,
                             publications: &self.publications,
                             selected: self.selected.as_ref().map(|a| &a.article.id),
@@ -1484,11 +1460,7 @@ impl eframe::App for App {
                         &mut actions,
                     );
                 });
-            if self.view == View::Archive {
-                self.settings.archive_scroll = new_scroll;
-            } else {
-                self.settings.inbox_scroll = new_scroll;
-            }
+            *self.settings.list(scope).scroll = new_scroll;
             let mut reader_layout = ui::reader::ReaderLayout::default();
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(colors.reader))

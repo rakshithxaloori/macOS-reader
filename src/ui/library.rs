@@ -85,7 +85,7 @@ pub fn draw(ui: &mut Ui, state: State<'_>, actions: &mut Vec<Action>) -> f32 {
                                 ui.close();
                             }
                             if (state.grouped && !q.publication.is_empty() || !q.feed.is_empty())
-                                && q.scope != crate::domain::Scope::Archive
+                                && q.scope == crate::domain::Scope::Inbox
                                 && controls::action(
                                     ui,
                                     if q.feed.is_empty() {
@@ -117,7 +117,9 @@ pub fn draw(ui: &mut Ui, state: State<'_>, actions: &mut Vec<Action>) -> f32 {
                             }
                         });
                     let unread = q.read == ReadFilter::Unread;
+                    // Feeds and Favorites list every article regardless of read state.
                     if q.feed.is_empty()
+                        && q.scope != crate::domain::Scope::Favorites
                         && let Some(choice) =
                             controls::segmented(ui, &["Unread", "Read"], usize::from(!unread))
                     {
@@ -350,7 +352,7 @@ pub fn draw(ui: &mut Ui, state: State<'_>, actions: &mut Vec<Action>) -> f32 {
                 && !state.publications.is_empty()
             {
                 ui.add_space(6.);
-                let archivable = state.query.scope != crate::domain::Scope::Archive;
+                let archivable = state.query.scope == crate::domain::Scope::Inbox;
                 for (host, count) in state.publications {
                     let (outer, response) =
                         ui.allocate_exact_size(vec2(ui.available_width(), 60.), Sense::click());
@@ -716,6 +718,7 @@ pub fn draw(ui: &mut Ui, state: State<'_>, actions: &mut Vec<Action>) -> f32 {
                     || !state.query.publication.is_empty()
                     || state.query.origin != Origin::All;
                 let unread = state.query.read == ReadFilter::Unread;
+                let favorites = state.view == View::Favorites;
                 let (title, description) = if empty_library {
                     (
                         "Your reading list starts here",
@@ -725,6 +728,11 @@ pub fn draw(ui: &mut Ui, state: State<'_>, actions: &mut Vec<Action>) -> f32 {
                     (
                         "No matching articles",
                         "Try a different search or clear your filters.",
+                    )
+                } else if favorites {
+                    (
+                        "No favorites yet",
+                        "Star an article in the reader to keep it here.",
                     )
                 } else if unread {
                     (
@@ -739,10 +747,10 @@ pub fn draw(ui: &mut Ui, state: State<'_>, actions: &mut Vec<Action>) -> f32 {
                 };
                 controls::empty(
                     ui,
-                    if state.view == View::Archive {
-                        Icon::Archive
-                    } else {
-                        Icon::Inbox
+                    match state.view {
+                        View::Archive => Icon::Archive,
+                        View::Favorites => Icon::Star,
+                        _ => Icon::Inbox,
                     },
                     title,
                     description,
@@ -760,16 +768,17 @@ pub fn draw(ui: &mut Ui, state: State<'_>, actions: &mut Vec<Action>) -> f32 {
                             query.origin = Origin::All;
                             actions.push(Action::Query(query));
                         }
-                    } else if controls::action(
-                        ui,
-                        if unread {
-                            "Show read articles"
-                        } else {
-                            "Show unread articles"
-                        },
-                        ButtonKind::Secondary,
-                    )
-                    .clicked()
+                    } else if !favorites
+                        && controls::action(
+                            ui,
+                            if unread {
+                                "Show read articles"
+                            } else {
+                                "Show unread articles"
+                            },
+                            ButtonKind::Secondary,
+                        )
+                        .clicked()
                     {
                         let mut query = state.query.clone();
                         query.read = if unread {

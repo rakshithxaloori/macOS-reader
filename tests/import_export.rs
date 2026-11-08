@@ -59,6 +59,25 @@ fn durable_batches_replay_preserve_state_and_subscription_pause() {
     assert!(library::body(&c, &a).is_err());
 }
 #[test]
+fn portable_import_keeps_favorites() {
+    let mut c = db();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("favorites.json");
+    let input = json!({"format":"reading-list-v1","articles":[{"url":"https://example.com/fav","title":"Kept","status":"pending","archived_at":"2026-01-02T00:00:00Z","favorited_at":"2026-01-01T00:00:00Z"},{"url":"https://example.com/plain","title":"Plain","status":"pending"}]});
+    std::fs::write(&path, serde_json::to_vec(&input).unwrap()).unwrap();
+    let run = imports::stage(&mut c, &path).unwrap();
+    imports::start(&mut c, &run, false).unwrap();
+    while imports::run_batch(&mut c).unwrap() {}
+    let favorites = library::articles(&c, &Query::for_scope(Scope::Favorites), 0).unwrap();
+    assert_eq!(favorites.len(), 1);
+    assert_eq!(favorites[0].title, "Kept");
+    assert!(favorites[0].archived_at.is_some());
+    assert_eq!(
+        favorites[0].favorited_at.as_deref(),
+        Some("2026-01-01T00:00:00.000Z")
+    );
+}
+#[test]
 fn export_excludes_credentials_and_retains_content_artifacts() {
     let mut c = db();
     let (a, _) = library::save(
