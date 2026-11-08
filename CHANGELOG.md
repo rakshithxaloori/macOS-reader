@@ -7,7 +7,24 @@ version for fixes. Each release is a `vX.Y.Z` tag on `main`.
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-11-08
+
+### Added
+- A Favorites tab between Inbox and Archive (View > Favorites, ⌘8). The star
+  in the reader toolbar favorites an article without changing its read,
+  archive or cache state, and Favorites lists it wherever it lives. Export
+  and import carry the favorite date.
+- Animated GIFs play in the reader, and YouTube, Vimeo and direct
+  mp4/m4v/mov/webm video embeds play inline. Players pause when the reader is
+  hidden, and the article keeps scrolling with the pointer over a video.
+
+### Changed
+- The library database gains a `favorited_at` column (schema version 3),
+  applied automatically on first launch; existing articles start unfavorited.
+
 ### Fixed
+- Extraction keeps an HTML `<video>` element's own file link instead of the
+  page URL.
 - Links on WordPress.com and other IPv4-only sites no longer fail with "URL
   resolves to a private network" on networks that use DNS64/NAT64. Synthesized
   `64:ff9b::/96` addresses are judged by the IPv4 address they embed.
