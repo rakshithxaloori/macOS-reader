@@ -628,7 +628,14 @@ impl App {
                             body.article.favorited_at = selected.article.favorited_at.clone();
                         }
                         self.reader.set_html(&body.html);
-                        for (id, bytes) in &body.media {
+                        // A scanned PDF has no text to read; open its pages instead.
+                        if body.pdf().is_some() && body.article.word_count == 0 {
+                            self.pdf_mode = true;
+                        }
+                        // A PDF link's original is cached as media too; it is not an image.
+                        for (id, bytes) in
+                            body.media.iter().filter(|(_, b)| !b.starts_with(b"%PDF-"))
+                        {
                             if let Err(e) =
                                 self.reader
                                     .cache_image(ctx, &format!("/api/media/{id}"), bytes)

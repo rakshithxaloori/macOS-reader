@@ -604,6 +604,10 @@ impl Worker {
                 let sender = connected_tx.clone();
                 let epoch = connected_epoch.clone();
                 async move {
+                    // whatsapp-rust announces "available" on connect; the reader
+                    // is not a chat client, so stay offline and let the phone
+                    // keep its notifications. Receipts and messages still flow.
+                    let _ = client.presence().set_unavailable().await;
                     let _ = sender
                         .send(Notice::Connected {
                             epoch,
@@ -613,10 +617,17 @@ impl Worker {
                         .await;
                 }
             })
-            .on_event(move |event, _client| {
+            .on_event(move |event, client| {
                 let sender = notices.clone();
                 let epoch = event_epoch.clone();
                 async move {
+                    if matches!(&*event, Event::SelfPushNameUpdated(_)) {
+                        // The library sends "available" right after this event.
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            let _ = client.presence().set_unavailable().await;
+                        });
+                    }
                     let notice = match &*event {
                         Event::Disconnected(_) => Some(Notice::Disconnected { epoch }),
                         Event::LoggedOut(_) => Some(Notice::LoggedOut { epoch }),

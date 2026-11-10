@@ -5,12 +5,32 @@ All notable changes to Reader (formerly Read Later and Reading List) are recorde
 a library conversion, a minor version for features and redesigns, and a patch
 version for fixes. Each release is a `vX.Y.Z` tag on `main`.
 
-## [Unreleased]
+## [0.3.8] - 2026-11-10
+
+### Added
+- Google Drive share links to PDFs save the PDF itself (through Drive's
+  download link, including the large-file confirmation). The article keeps the
+  share link as its URL.
+- YouTube and Vimeo players in RSS articles: feed bodies now turn embedded
+  players into the reader's video figure, as saved pages already did.
+- Scanned PDFs with no selectable text are saved and open in PDF view.
 
 ### Changed
+- The in-reader PDF view caps portrait pages at a readable width; landscape
+  pages still fill the reader.
+- Embedded posts from X/Twitter show as a quoted card: author, text, and a
+  dated "View on X" link, in feeds and saved pages.
+- WhatsApp: the link no longer shows you as online, so your phone keeps its
+  notifications.
 - The repository is now `rakshithxaloori/reader-macOS`. Check for Updates
   follows GitHub's redirect when the repository is renamed, so later renames
   do not break it.
+
+### Fixed
+- The open-in-browser toolbar button and Open original now open the article
+  in the default browser.
+- Opening a saved PDF no longer shows "The image format could not be
+  determined".
 
 ## [0.3.7] - 2026-11-08
 

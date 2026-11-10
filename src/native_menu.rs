@@ -62,6 +62,22 @@ pub fn reduce_motion() -> bool {
         false
     }
 }
+/// Open an http(s) or mailto link in the default app. egui's `open_url` is a
+/// no-op here because egui-winit's `links` feature is not enabled.
+pub fn open_url(url: &str) {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return;
+    };
+    if !matches!(parsed.scheme(), "http" | "https" | "mailto") {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(link) = objc2_foundation::NSURL::URLWithString(
+        &objc2_foundation::NSString::from_str(parsed.as_str()),
+    ) {
+        objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&link);
+    }
+}
 pub fn install(wake: Arc<dyn Fn() + Send + Sync>) {
     *WAKE.lock().expect("Menu wake lock") = Some(wake);
     macos::install();
