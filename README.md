@@ -55,7 +55,7 @@ is egui and the article view uses AppKit.
 ## Download
 
 Get the latest version at [reader.rakshithxaloori.com](https://reader.rakshithxaloori.com)
-or from [Releases](https://github.com/rakshithxaloori/macOS-reader/releases/latest).
+or from [Releases](https://github.com/rakshithxaloori/reader-macOS/releases/latest).
 Open `Reader.dmg` and drag Reader into Applications. It needs macOS 13
 or later on an Apple silicon Mac.
 
@@ -82,8 +82,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 copy (replace `YOUR-NAME`):
 
 ```sh
-git clone https://github.com/YOUR-NAME/macOS-reader.git
-cd macOS-reader
+git clone https://github.com/YOUR-NAME/reader-macOS.git
+cd reader-macOS
 cargo run --release
 ```
 
@@ -114,7 +114,7 @@ with someone else, `./scripts/dmg.sh` makes a disk image in `.local/releases`.
 changes:
 
 ```sh
-git remote add upstream https://github.com/rakshithxaloori/macOS-reader.git
+git remote add upstream https://github.com/rakshithxaloori/reader-macOS.git
 git pull upstream main
 ```
 
