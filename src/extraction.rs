@@ -144,6 +144,16 @@ pub fn clean_html(html: &str, base: &str, remote_images: bool) -> String {
             return;
         }
         let tag = element.value().name();
+        // Feed bodies skip `extract`, so convert players and social cards here too.
+        if (matches!(tag, "iframe" | "video")
+            || element.value().attr("data-component-name").is_some())
+            && let Some(page) = base
+            && let Some(replacement) = embed_html(element, page)
+        {
+            let fragment = Html::parse_fragment(&replacement);
+            emit(fragment.root_element(), base, remote, out);
+            return;
+        }
         let allowed = matches!(
             tag,
             "p" | "br"
@@ -415,12 +425,39 @@ fn embed_html(node: ElementRef<'_>, page_url: &Url) -> Option<String> {
     if text.trim().is_empty() {
         return None;
     }
+    // A quoted card: author line, the post's text, then a dated link to it.
     let mut out = String::from("<blockquote>");
+    match (field("name"), field("username")) {
+        ("", "") => {}
+        (name, "") => out.push_str(&format!("<p><strong>{}</strong></p>", escape(name))),
+        ("", user) => out.push_str(&format!("<p><strong>@{}</strong></p>", escape(user))),
+        (name, user) => out.push_str(&format!(
+            "<p><strong>{}</strong> @{}</p>",
+            escape(name),
+            escape(user)
+        )),
+    }
     for paragraph in text.split("\n\n").filter(|p| !p.trim().is_empty()) {
         let lines: Vec<_> = paragraph.trim().lines().map(|l| escape(l.trim())).collect();
         out.push_str(&format!("<p>{}</p>", lines.join("<br>")));
     }
-    let mut photos = String::new();
+    let date = chrono::DateTime::parse_from_rfc3339(field("date"))
+        .map(|d| format!(" · {}", d.format("%b %-d, %Y")))
+        .unwrap_or_default();
+    let label = if field("url").contains("x.com/") || field("url").contains("twitter.com/") {
+        "View on X"
+    } else {
+        "View post"
+    };
+    if field("url").is_empty() {
+        out.push_str(&format!("<p>{label}{date}</p>"));
+    } else {
+        out.push_str(&format!(
+            "<p><a href=\"{}\">{label}{date}</a></p>",
+            escape(field("url"))
+        ));
+    }
+    out.push_str("</blockquote>");
     for photo in tweet
         .get("photos")
         .and_then(|p| p.as_array())
@@ -428,35 +465,8 @@ fn embed_html(node: ElementRef<'_>, page_url: &Url) -> Option<String> {
         .flatten()
         .filter_map(|p| p.get("img_url")?.as_str())
     {
-        photos.push_str(&format!("<p><img src=\"{}\" alt=\"\"></p>", escape(photo)));
+        out.push_str(&format!("<p><img src=\"{}\" alt=\"\"></p>", escape(photo)));
     }
-    let date = chrono::DateTime::parse_from_rfc3339(field("date"))
-        .map(|d| d.format("%b %-d, %Y").to_string())
-        .unwrap_or_default();
-    let byline = match (field("name"), field("username")) {
-        ("", "") => String::new(),
-        (name, "") => escape(name),
-        ("", user) => format!("@{}", escape(user)),
-        (name, user) => format!("{} (@{})", escape(name), escape(user)),
-    };
-    let link = if date.is_empty() {
-        "View post".to_owned()
-    } else {
-        date
-    };
-    let source = if field("url").is_empty() {
-        link
-    } else {
-        format!("<a href=\"{}\">{link}</a>", escape(field("url")))
-    };
-    out.push_str(&format!(
-        "<p>— {}{source}</p></blockquote>{photos}",
-        if byline.is_empty() {
-            String::new()
-        } else {
-            format!("{byline} · ")
-        }
-    ));
     Some(out)
 }
 pub fn extract(body: &str, url: &str) -> Result<Extraction, String> {
@@ -1004,15 +1014,38 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("<blockquote><p>First line</p><p>Second @friend</p>"),
+            out.contains("<blockquote><p><strong>Some One</strong> @someone</p><p>First line</p><p>Second @friend</p>"),
             "{out}"
         );
         assert!(
-            out.contains("— Some One (@someone) · <a href=\"https://x.com/someone/status/1\""),
+            out.contains("<p><a href=\"https://x.com/someone/status/1\" rel=\"noreferrer noopener\">View on X · Oct 21, 2026</a></p></blockquote>"),
             "{out}"
         );
         assert!(!out.contains("avatar.jpg"), "{out}");
         assert!(!out.contains("READER_PRIVATE_STRUCTURE"), "{out}");
+    }
+    #[test]
+    fn feed_bodies_keep_video_players_and_tweet_cards() {
+        let tweet = r#"{"url":"https://x.com/a/status/1","full_text":"Hello","username":"a","name":"A","date":"","photos":[]}"#;
+        let out = clean_html(
+            &format!(
+                "<p>Intro</p><iframe src=\"https://www.youtube-nocookie.com/embed/xyz?rel=0\"></iframe><iframe src=\"https://evil.invalid/x\"></iframe><div class=\"twitter-embed\" data-attrs=\"{}\" data-component-name=\"Twitter2ToDOM\"></div>",
+                escape(tweet)
+            ),
+            "https://example.org/p/post",
+            false,
+        );
+        assert!(
+            out.contains(
+                "<figure><figcaption>Video · <a href=\"https://www.youtube.com/watch?v=xyz\""
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("evil"), "{out}");
+        assert!(
+            out.contains("<strong>A</strong> @a</p><p>Hello</p>"),
+            "{out}"
+        );
     }
     #[test]
     fn sanitizer_keeps_native_footnote_targets_and_same_page_links() {

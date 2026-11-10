@@ -785,7 +785,7 @@ fn show_runs(ui: &mut Ui, runs: &[Inline], size: f32, family: ReaderFont) {
                 && url::Url::parse(href)
                     .is_ok_and(|u| matches!(u.scheme(), "https" | "http" | "mailto"))
             {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(href.as_str()));
+                crate::native_menu::open_url(href.as_str());
             }
         }
     }
@@ -3383,6 +3383,7 @@ pub mod native {
             let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
             self.scroll.setFrame(frame);
             self.pdf.setFrame(frame);
+            self.fit_pdf();
             let minimum_inset = if width > 700.0 { 76.0 } else { 28.0 };
             let inset = ((width - 780.0) / 2.0).max(minimum_inset);
             let content_width = (width - inset * 2.0).max(80.0);
@@ -3472,6 +3473,30 @@ pub mod native {
                 .setFrameSize(NSSize::new(width, (y + body_height + 38.0).max(height)));
             self.document_view.setNeedsDisplay(true);
         }
+        /// Landscape pages fill the reader; portrait pages are capped at a
+        /// readable width (PDFView centers them) instead of filling a wide window.
+        fn fit_pdf(&self) {
+            const MAX_PORTRAIT_WIDTH: f64 = 820.0;
+            let Some(page) = (unsafe { self.pdf.document() })
+                .and_then(|document| unsafe { document.pageAtIndex(0) })
+            else {
+                return;
+            };
+            let bounds = unsafe { page.boundsForBox(objc2_pdf_kit::PDFDisplayBox::CropBox) };
+            let (mut page_w, mut page_h) = (bounds.size.width, bounds.size.height);
+            if unsafe { page.rotation() } % 180 != 0 {
+                std::mem::swap(&mut page_w, &mut page_h);
+            }
+            let view_w = self.pdf.frame().size.width;
+            if page_w <= 0.0 || page_w > page_h || view_w <= MAX_PORTRAIT_WIDTH + 40.0 {
+                unsafe { self.pdf.setAutoScales(true) };
+                return;
+            }
+            unsafe {
+                self.pdf.setAutoScales(false);
+                self.pdf.setScaleFactor(MAX_PORTRAIT_WIDTH / page_w);
+            }
+        }
         /// Show the exact PDF bytes (keyed by article) in place of the text
         /// body, or `None` for the extracted text. Neither copy is changed.
         pub fn set_pdf(&self, pdf: Option<(&str, &[u8])>) -> Result<(), String> {
@@ -3492,6 +3517,7 @@ pub mod native {
                 .ok_or("The PDF could not be decoded")?;
                 unsafe { self.pdf.setDocument(Some(&document)) };
                 *self.pdf_key.borrow_mut() = key;
+                self.fit_pdf();
             }
             self.set_visible(self.visible.get());
             Ok(())

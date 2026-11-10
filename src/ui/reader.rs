@@ -70,7 +70,7 @@ pub fn draw(ui: &mut Ui, view: ReaderView<'_>, actions: &mut Vec<Action>) -> Rea
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(a) = article {
                             if controls::toolbar_button(ui, Icon::External, "Open original article", false).clicked() {
-                                ui.ctx().open_url(egui::OpenUrl::new_tab(&a.url));
+                                crate::native_menu::open_url(&a.url);
                             }
                             if pdf && (pdf_mode || !native) && controls::toolbar_button(ui, Icon::Book, "Open PDF in a window", false).clicked() {
                                 actions.push(Action::OpenArticlePdf);
@@ -165,7 +165,7 @@ pub fn draw(ui: &mut Ui, view: ReaderView<'_>, actions: &mut Vec<Action>) -> Rea
                                     ui.add_space(12.);
                                     ui.horizontal_wrapped(|ui| {
                                         if controls::action(ui, "Retry", ButtonKind::Secondary).clicked() { actions.push(Action::Command(Command::Refetch(a.id.clone()))); }
-                                        if controls::action(ui, "Open original", ButtonKind::Quiet).clicked() { ui.ctx().open_url(egui::OpenUrl::new_tab(&a.url)); }
+                                        if controls::action(ui, "Open original", ButtonKind::Quiet).clicked() { crate::native_menu::open_url(&a.url); }
                                         if controls::action(ui, "Details", ButtonKind::Quiet).clicked() {
                                             actions.push(Action::ShowDetails { title: title.into(), message: details.into() });
                                         }

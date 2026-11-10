@@ -78,6 +78,69 @@ pub struct ConditionalResource {
     pub last_modified: Option<String>,
 }
 pub async fn fetch(input: &str, image: bool) -> Result<Resource> {
+    if !image && let Some(download) = drive_download(input) {
+        // A Drive share link is an HTML viewer; fetch the file itself. Large
+        // files answer with a virus-scan form first, which is submitted once.
+        let mut fetched = fetch_plain(download.as_str(), false).await;
+        if let Ok(page) = &fetched
+            && let Some(confirmed) = drive_confirm(page)
+        {
+            fetched = fetch_plain(confirmed.as_str(), false).await;
+        }
+        if let Ok(mut file) = fetched
+            && file.body.starts_with(b"%PDF-")
+        {
+            file.url = Url::parse(input)?;
+            return Ok(file);
+        }
+    }
+    fetch_plain(input, image).await
+}
+/// `https://drive.google.com/file/d/<ID>/view…` (or `open?id=<ID>`) → direct download URL.
+pub fn drive_download(input: &str) -> Option<Url> {
+    let url = Url::parse(input).ok()?;
+    if url.host_str()? != "drive.google.com" {
+        return None;
+    }
+    let segments: Vec<_> = url.path_segments()?.collect();
+    let id = match segments.as_slice() {
+        ["file", "d", id, ..] => id.to_string(),
+        ["open"] | ["uc"] => url.query_pairs().find(|(k, _)| k == "id")?.1.into_owned(),
+        _ => return None,
+    };
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    let mut download = Url::parse("https://drive.google.com/uc?export=download").ok()?;
+    download.query_pairs_mut().append_pair("id", &id);
+    Some(download)
+}
+fn drive_confirm(page: &Resource) -> Option<Url> {
+    if !page.content_type.contains("html") {
+        return None;
+    }
+    let html = scraper::Html::parse_document(std::str::from_utf8(&page.body).ok()?);
+    let form = html
+        .select(&scraper::Selector::parse("form#download-form").ok()?)
+        .next()?;
+    let mut action = page.url.join(form.value().attr("action")?).ok()?;
+    if action.scheme() != "https" || !action.host_str()?.ends_with(".google.com") {
+        return None;
+    }
+    let inputs = scraper::Selector::parse("input[type=hidden]").ok()?;
+    for input in form.select(&inputs) {
+        if let (Some(name), Some(value)) = (input.value().attr("name"), input.value().attr("value"))
+        {
+            action.query_pairs_mut().append_pair(name, value);
+        }
+    }
+    Some(action)
+}
+async fn fetch_plain(input: &str, image: bool) -> Result<Resource> {
     tokio::time::timeout(
         Duration::from_secs(if image { 8 } else { 25 }),
         fetch_inner(input, image, !image, None, None, MAX_RESPONSE),
@@ -306,5 +369,20 @@ mod tests {
         ] {
             assert!(!public_ip(ip.parse().unwrap()), "{ip}");
         }
+    }
+}
+#[cfg(test)]
+mod drive_tests {
+    #[test]
+    fn drive_share_links_map_to_direct_downloads() {
+        assert_eq!(
+            super::drive_download("https://drive.google.com/file/d/1AbC-d_9/view?usp=sharing")
+                .unwrap()
+                .as_str(),
+            "https://drive.google.com/uc?export=download&id=1AbC-d_9"
+        );
+        assert!(super::drive_download("https://drive.google.com/open?id=xyz").is_some());
+        assert!(super::drive_download("https://drive.google.com/drive/folders/abc").is_none());
+        assert!(super::drive_download("https://example.org/file/d/abc/view").is_none());
     }
 }

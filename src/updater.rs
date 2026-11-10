@@ -15,7 +15,13 @@ use std::{
     time::Duration,
 };
 
-pub const REPOSITORY: &str = "rakshithxaloori/macOS-reader";
+pub const REPOSITORY: &str = "rakshithxaloori/reader-macOS";
+/// A rename of the repository makes GitHub answer `/releases/latest` with a
+/// redirect to the new name first; accept any repository of this owner so the
+/// next rename does not break installed copies.
+const OWNER: &str = "rakshithxaloori";
+/// Redirects followed to reach the tag: a rename hop, then the tag itself.
+const MAX_HOPS: usize = 3;
 /// Launch checks run at most once per this interval.
 pub const CHECK_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 /// A disk image larger than this is not a Reader release.
@@ -57,17 +63,35 @@ impl std::fmt::Display for Version {
 
 /// Read the release version from the `Location` of `/releases/latest`.
 pub fn release_from_location(location: &str) -> Option<Version> {
+    let path = github_path(location)?;
+    match path.split('/').collect::<Vec<_>>()[..] {
+        ["", owner, repo, "releases", "tag", tag]
+            if owner.eq_ignore_ascii_case(OWNER) && !repo.is_empty() =>
+        {
+            Version::parse(tag)
+        }
+        _ => None,
+    }
+}
+
+/// The `/releases/latest` URL of a renamed repository, from GitHub's redirect.
+fn renamed_latest(location: &str) -> Option<String> {
+    let path = github_path(location)?;
+    match path.split('/').collect::<Vec<_>>()[..] {
+        ["", owner, repo, "releases", "latest"]
+            if owner.eq_ignore_ascii_case(OWNER) && !repo.is_empty() =>
+        {
+            Some(format!("https://github.com{path}"))
+        }
+        _ => None,
+    }
+}
+
+fn github_path(location: &str) -> Option<String> {
     let url = url::Url::parse(location)
         .or_else(|_| url::Url::parse("https://github.com")?.join(location))
         .ok()?;
-    if url.host_str() != Some("github.com") {
-        return None;
-    }
-    let prefix = format!("/{REPOSITORY}/releases/tag/");
-    let path = url.path();
-    path.get(..prefix.len())
-        .filter(|p| p.eq_ignore_ascii_case(&prefix))
-        .and_then(|_| Version::parse(&path[prefix.len()..]))
+    (url.host_str() == Some("github.com")).then(|| url.path().to_owned())
 }
 
 /// The newer release, if `latest` is one.
@@ -102,26 +126,29 @@ fn client(redirects: bool) -> Result<reqwest::Client> {
 
 /// The newest published release.
 pub async fn latest() -> Result<Version> {
-    let response = tokio::time::timeout(
-        Duration::from_secs(25),
-        client(false)?
-            .head(format!("https://github.com/{REPOSITORY}/releases/latest"))
-            .send(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("GitHub did not answer within 25 seconds"))??;
-    ensure!(
-        response.status().is_redirection(),
-        "GitHub answered {} instead of naming the latest release",
-        response.status()
-    );
-    let location = response
-        .headers()
-        .get(reqwest::header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .context("GitHub did not name the latest release")?;
-    release_from_location(location)
-        .with_context(|| format!("The latest release is not an X.Y.Z version: {location}"))
+    let client = client(false)?;
+    let mut url = format!("https://github.com/{REPOSITORY}/releases/latest");
+    for _ in 0..MAX_HOPS {
+        let response = tokio::time::timeout(Duration::from_secs(25), client.head(&url).send())
+            .await
+            .map_err(|_| anyhow::anyhow!("GitHub did not answer within 25 seconds"))??;
+        ensure!(
+            response.status().is_redirection(),
+            "GitHub answered {} instead of naming the latest release",
+            response.status()
+        );
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .context("GitHub did not name the latest release")?;
+        if let Some(version) = release_from_location(location) {
+            return Ok(version);
+        }
+        url = renamed_latest(location)
+            .with_context(|| format!("The latest release is not an X.Y.Z version: {location}"))?;
+    }
+    bail!("GitHub redirected too many times before naming the latest release")
 }
 
 #[derive(Clone, Debug)]
@@ -557,11 +584,34 @@ mod tests {
             format!("{base}/tag/v0.4.0-rc.1"),
             format!("{base}/tag/latest"),
             format!("{base}/tag/v0.4.0/extra"),
-            "https://example.com/rakshithxaloori/macOS-reader/releases/tag/v9.0.0".into(),
+            "https://example.com/rakshithxaloori/reader-macOS/releases/tag/v9.0.0".into(),
             "https://github.com/someone/else/releases/tag/v9.0.0".into(),
             "not a url".into(),
         ] {
             assert_eq!(release_from_location(&location), None, "{location}");
+        }
+        // A tag under a former name of the repository still counts.
+        assert_eq!(
+            release_from_location(
+                "https://github.com/rakshithxaloori/macOS-reader/releases/tag/v0.3.7"
+            ),
+            Some(Version(0, 3, 7))
+        );
+    }
+
+    #[test]
+    fn rename_redirects_lead_to_the_new_latest() {
+        assert_eq!(
+            renamed_latest("https://github.com/rakshithxaloori/reader-macOS/releases/latest")
+                .as_deref(),
+            Some("https://github.com/rakshithxaloori/reader-macOS/releases/latest")
+        );
+        for location in [
+            "https://github.com/someone/else/releases/latest",
+            "https://example.com/rakshithxaloori/reader-macOS/releases/latest",
+            "https://github.com/login",
+        ] {
+            assert_eq!(renamed_latest(location), None, "{location}");
         }
     }
 
@@ -569,7 +619,7 @@ mod tests {
     fn image_url_uses_the_fixed_asset_name() {
         assert_eq!(
             image_url(Version(0, 4, 0), "Reader.dmg"),
-            "https://github.com/rakshithxaloori/macOS-reader/releases/download/v0.4.0/Reader.dmg"
+            "https://github.com/rakshithxaloori/reader-macOS/releases/download/v0.4.0/Reader.dmg"
         );
         assert_eq!(
             target_path(Path::new("/Applications/Read Later.app")),
