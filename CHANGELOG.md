@@ -7,6 +7,11 @@ version for fixes. Each release is a `vX.Y.Z` tag on `main`.
 
 ## [Unreleased]
 
+### Changed
+- The repository is now `rakshithxaloori/reader-macOS`. Check for Updates
+  follows GitHub's redirect when the repository is renamed, so later renames
+  do not break it.
+
 ## [0.3.7] - 2026-11-08
 
 ### Changed

@@ -895,7 +895,7 @@ impl App {
                     return;
                 }
                 if let Some(path) = rfd::FileDialog::new()
-                    .set_file_name("macOS-reader.zip")
+                    .set_file_name("reader-macOS.zip")
                     .add_filter("ZIP", &["zip"])
                     .save_file()
                 {
