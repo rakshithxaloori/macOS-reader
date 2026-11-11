@@ -2152,7 +2152,7 @@ pub mod native {
             let placeholder = unsafe {
                 NSMutableAttributedString::initWithString_attributes(
                     NSMutableAttributedString::alloc(),
-                    &NSString::from_str("\u{fffc}\u{2028}"),
+                    &NSString::from_str("\u{fffc}\n"),
                     Some(&attributes),
                 )
             };
@@ -2163,6 +2163,15 @@ pub mod native {
             attachment.setBounds(NSRect::new(NSPoint::new(0.0, 0.0), size));
             unsafe {
                 placeholder.removeAttribute_range(NSLinkAttributeName, NSRange::new(0, 2));
+                // The player gets its own paragraph at single line height; the
+                // reader's 1.6 multiple would otherwise stretch its line by 60%.
+                let style = objc2_app_kit::NSMutableParagraphStyle::new();
+                style.setParagraphSpacing(8.0);
+                placeholder.addAttribute_value_range(
+                    objc2_app_kit::NSParagraphStyleAttributeName,
+                    &style,
+                    NSRange::new(0, 2),
+                );
                 placeholder.addAttribute_value_range(
                     NSAttachmentAttributeName,
                     &attachment,
@@ -2219,8 +2228,14 @@ pub mod native {
         let gifs = attachments(&output)
             .into_iter()
             .map(|(_, attachment)| attachment)
-            .filter(|attachment| attachment.image().is_some_and(|image| animated(&image)));
-        for (ordinal, attachment) in gifs.enumerate() {
+            .filter(|attachment| {
+                !media
+                    .iter()
+                    .any(|m: &Media| std::ptr::eq(&*m.attachment, &**attachment))
+            })
+            .filter(|attachment| attachment.image().is_some_and(|image| animated(&image)))
+            .collect::<Vec<_>>();
+        for (ordinal, attachment) in gifs.into_iter().enumerate() {
             let key = format!("gif:{ordinal}");
             let view = previous.remove(&key).unwrap_or_else(|| {
                 let view: Retained<AnimatedImageView> = unsafe {
@@ -3422,8 +3437,11 @@ pub mod native {
                 })
                 .collect();
             let (attributed, media) = media_overlays(&attributed, &document.videos, previous);
+            // Overlays sit beside the text view, not inside it: NSTextView's own
+            // click and attachment gesture recognizers would otherwise claim
+            // every click on a player before WebKit sees it.
             for item in &media {
-                self.text.addSubview(&item.view);
+                self.document_view.addSubview(&item.view);
             }
             self.media = media;
             let scroll_origin = self.scroll.contentView().bounds().origin;
@@ -3522,7 +3540,9 @@ pub mod native {
             if let (Some(manager), Some(container)) =
                 unsafe { (self.text.layoutManager(), self.text.textContainer()) }
             {
-                let origin = self.text.textContainerOrigin();
+                let mut origin = self.text.textContainerOrigin();
+                origin.x += inset;
+                origin.y += y;
                 for item in &self.media {
                     let Some((index, _)) = placed
                         .iter()

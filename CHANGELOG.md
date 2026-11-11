@@ -31,9 +31,10 @@ version for fixes. Each release is a `vX.Y.Z` tag on `main`.
   in the default browser.
 - Opening a saved PDF no longer shows "The image format could not be
   determined".
-- YouTube and Vimeo players play in the reader (they now load as their own
-  page instead of inside a local frame), and links out of a player, such as
-  "Watch on YouTube", open in the default browser.
+- YouTube and Vimeo players respond to clicks: play, pause and the player's
+  controls work (the text view's own click handling no longer intercepts
+  them), and links out of a player, such as "Watch on YouTube", open in the
+  default browser. The empty gap below a video is gone.
 - Embedded X posts on saved Substack pages show as the quote card too,
   including a quoted post, without the avatar or reply/repost/like counts.
 
