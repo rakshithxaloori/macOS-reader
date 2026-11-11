@@ -65,6 +65,9 @@ pub struct RichDocument {
     pub image_links: HashMap<String, String>,
     /// Caption links of image-free figures that `video_player` can play.
     pub videos: Vec<String>,
+    /// Post cards from extraction: the status link and the card's HTML. The
+    /// native reader shows X's own embed in their place when it loads.
+    pub tweets: Vec<(String, String)>,
     pub blocks: Vec<Block>,
     /// Digest of the original saved bytes, never of a flattened presentation.
     pub source_sha256: String,
@@ -105,10 +108,27 @@ impl RichDocument {
             .filter(|href| video_player(href).is_some())
             .map(str::to_owned)
             .collect();
+        let tweets = html
+            .select(&selector("blockquote"))
+            .filter(|quote| {
+                !quote
+                    .ancestors()
+                    .filter_map(ElementRef::wrap)
+                    .any(|e| e.value().name() == "blockquote")
+            })
+            .filter_map(|quote| {
+                let link = quote.select(&selector("p > a[href]")).last()?;
+                let href = link.value().attr("href")?;
+                (link.text().collect::<String>().starts_with("View on X")
+                    && tweet_status(href).is_some())
+                .then(|| (href.to_owned(), quote.inner_html()))
+            })
+            .collect();
         Self {
             image_layouts,
             image_links,
             videos,
+            tweets,
             blocks,
             source_sha256: format!("{:x}", Sha256::digest(saved_html.as_bytes())),
         }
@@ -139,6 +159,53 @@ impl RichDocument {
         collect(&self.blocks, &mut out);
         out
     }
+}
+/// `https://twitter.com/<user>/status/<id>` for an X or Twitter post link.
+pub fn tweet_status(href: &str) -> Option<String> {
+    let url = url::Url::parse(href).ok()?;
+    let host = url
+        .host_str()?
+        .trim_start_matches("www.")
+        .trim_start_matches("mobile.");
+    if !matches!(host, "x.com" | "twitter.com") {
+        return None;
+    }
+    let segments: Vec<&str> = url.path_segments()?.collect();
+    match segments.as_slice() {
+        [user, "status", id, ..]
+            if !id.is_empty()
+                && id.bytes().all(|b| b.is_ascii_digit())
+                && user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') =>
+        {
+            Some(format!("https://twitter.com/{user}/status/{id}"))
+        }
+        _ => None,
+    }
+}
+/// The page that shows X's official embed for a post card. Without network the
+/// card's own text shows, styled as a quote; with it, widgets.js replaces it.
+pub fn tweet_page(status: &str, card_html: &str, appearance: Appearance) -> String {
+    let colors = appearance.palette();
+    let hex = |c: Color32| format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b());
+    let (ink, muted, border, background) = (
+        hex(colors.ink),
+        hex(colors.muted),
+        hex(colors.divider),
+        hex(colors.reader),
+    );
+    let dark = appearance == Appearance::Dark;
+    format!(
+        "<!doctype html><meta name=\"referrer\" content=\"strict-origin\"><meta name=\"twitter:dnt\" content=\"on\">\
+<style>html,body{{margin:0;background:{background};overflow:hidden}}body{{display:flex;justify-content:center}}\
+.twitter-tweet{{box-sizing:border-box;width:100%;max-width:550px;margin:0!important;padding:12px 16px;border:1px solid {border};border-radius:12px;font:15px/1.4 -apple-system,sans-serif;color:{ink}}}\
+.twitter-tweet p{{margin:0 0 8px}}.twitter-tweet a{{color:{muted}}}.twitter-tweet blockquote{{margin:8px 0;padding-left:10px;border-left:2px solid {border}}}\
+.twitter-tweet-rendered{{padding:0;border:0}}</style>\
+<blockquote class=\"twitter-tweet\" data-theme=\"{theme}\" data-dnt=\"true\" data-conversation=\"none\">{card_html}<a href=\"{status}\"></a></blockquote>\
+<script>function h(){{window.webkit.messageHandlers.reader.postMessage(Math.ceil(document.body.getBoundingClientRect().height))}}\
+new ResizeObserver(h).observe(document.body);addEventListener('load',h);</script>\
+<script async src=\"https://platform.twitter.com/widgets.js\" charset=\"utf-8\"></script>",
+        theme = if dark { "dark" } else { "light" },
+    )
 }
 /// What the native reader loads in place of a saved video link.
 #[derive(Debug, PartialEq)]
@@ -927,6 +994,30 @@ fn show_blocks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn post_cards_become_x_embeds_with_their_card_as_fallback() {
+        let html = "<blockquote><p><strong>Owl</strong> @owl</p><p>New knob</p><p><a href=\"https://x.com/owl/status/9?s=20\">View on X · Nov 6, 2026</a></p></blockquote>\
+            <blockquote><p>A plain quote <a href=\"https://x.com/owl/status/9\">link</a></p></blockquote>";
+        let document = RichDocument::parse(html);
+        assert_eq!(document.tweets.len(), 1);
+        assert_eq!(document.tweets[0].0, "https://x.com/owl/status/9?s=20");
+        assert!(document.tweets[0].1.contains("New knob"));
+        assert_eq!(
+            tweet_status("https://mobile.twitter.com/a_b/status/123/photo/1").as_deref(),
+            Some("https://twitter.com/a_b/status/123")
+        );
+        assert!(tweet_status("https://x.com/owl/likes").is_none());
+        assert!(tweet_status("https://example.org/owl/status/9").is_none());
+        let page = tweet_page(
+            "https://twitter.com/owl/status/9",
+            "<p>New knob</p>",
+            Appearance::Dark,
+        );
+        assert!(page.contains("class=\"twitter-tweet\" data-theme=\"dark\""));
+        assert!(page.contains("<p>New knob</p><a href=\"https://twitter.com/owl/status/9\"></a>"));
+        assert!(page.contains("https://platform.twitter.com/widgets.js"));
+        assert!(page.contains("messageHandlers.reader"));
+    }
     #[test]
     fn inline_image_keeps_its_position_between_prose() {
         let document = RichDocument::parse(
@@ -2083,6 +2174,48 @@ pub mod native {
             }
         }
     );
+    thread_local! {
+        /// Rendered heights of X embeds, keyed by their web view's address.
+        static EMBED_HEIGHTS: RefCell<HashMap<usize, f64>> = RefCell::new(HashMap::new());
+        static EMBED_WAKE: RefCell<Option<Arc<dyn Fn() + Send + Sync>>> = const { RefCell::new(None) };
+    }
+    struct EmbedHeightIvars {
+        view: usize,
+    }
+    define_class!(
+        // Receives an embed page's rendered height so its slot can match it.
+        #[unsafe(super(NSObject))]
+        #[thread_kind=MainThreadOnly]
+        #[ivars=EmbedHeightIvars]
+        #[name = "ReadingListReaderEmbedHeight"]
+        struct EmbedHeight;
+        unsafe impl NSObjectProtocol for EmbedHeight {}
+        unsafe impl WKScriptMessageHandler for EmbedHeight {
+            #[unsafe(method(userContentController:didReceiveScriptMessage:))]
+            fn did_receive(
+                &self,
+                _controller: &objc2_web_kit::WKUserContentController,
+                message: &objc2_web_kit::WKScriptMessage,
+            ) {
+                let body = unsafe { message.body() };
+                let Some(height) = body
+                    .downcast_ref::<objc2_foundation::NSNumber>()
+                    .map(|n| n.doubleValue())
+                else {
+                    return;
+                };
+                if height > 0.0 && height < 4000.0 {
+                    let view = self.ivars().view;
+                    EMBED_HEIGHTS.with(|heights| heights.borrow_mut().insert(view, height));
+                    EMBED_WAKE.with(|wake| {
+                        if let Some(wake) = wake.borrow().as_ref() {
+                            wake();
+                        }
+                    });
+                }
+            }
+        }
+    );
     fn open_request(action: &objc2_web_kit::WKNavigationAction) {
         if let Some(url) = unsafe { action.request() }
             .URL()
@@ -2091,7 +2224,7 @@ pub mod native {
             crate::native_menu::open_url(&url.to_string());
         }
     }
-    use objc2_web_kit::{WKNavigationDelegate, WKUIDelegate};
+    use objc2_web_kit::{WKNavigationDelegate, WKScriptMessageHandler, WKUIDelegate};
     const VIDEO_WIDTH: f64 = 780.0;
     /// Players load with this origin as their referrer; YouTube refuses an empty one.
     const VIDEO_ORIGIN: &str = "https://reader.rakshithxaloori.com/";
@@ -2123,6 +2256,8 @@ pub mod native {
     fn media_overlays(
         attributed: &NSAttributedString,
         videos: &[String],
+        tweets: &[(String, String)],
+        appearance: Appearance,
         mut previous: HashMap<String, Retained<NSView>>,
     ) -> (Retained<NSAttributedString>, Vec<Media>) {
         let mtm = MainThreadMarker::new().expect("reader media is built on the main thread");
@@ -2137,16 +2272,56 @@ pub mod native {
             if let Some(value) = unsafe {
                 output.attribute_atIndex_effectiveRange(NSLinkAttributeName, index, &mut range)
             } && let Some(href) = link_href(&value)
-                && videos.contains(&href)
             {
-                links.push((range, href));
+                let text = output.string();
+                if videos.contains(&href) {
+                    // A player goes above its caption.
+                    let start = text.paragraphRangeForRange(range).location;
+                    links.push((NSRange::new(start, 0), href, None));
+                } else if let Some((_, card)) = tweets.iter().find(|(status, _)| *status == href) {
+                    // An X embed replaces the whole quoted card and the post's
+                    // photos right after it; the embed shows them itself.
+                    let quoted = |location: usize| {
+                        unsafe {
+                            output.attribute_atIndex_effectiveRange(
+                                NSParagraphStyleAttributeName,
+                                location,
+                                std::ptr::null_mut(),
+                            )
+                        }
+                        .and_then(|style| style.downcast::<NSParagraphStyle>().ok())
+                        .is_some_and(|style| style.textBlocks().count() > 0)
+                    };
+                    let paragraph = text.paragraphRangeForRange(range);
+                    let mut start = paragraph.location;
+                    while start > 0 {
+                        let previous = text.paragraphRangeForRange(NSRange::new(start - 1, 0));
+                        if !quoted(previous.location) {
+                            break;
+                        }
+                        start = previous.location;
+                    }
+                    let mut end = paragraph.location + paragraph.length;
+                    while end < text.length() {
+                        let next = text.paragraphRangeForRange(NSRange::new(end, 0));
+                        let content = text.substringWithRange(next).to_string();
+                        let content = content.trim_end_matches(['\n', '\u{2028}']);
+                        if content.is_empty() || content.chars().any(|c| c != '\u{fffc}') {
+                            break;
+                        }
+                        end = next.location + next.length;
+                    }
+                    links.push((NSRange::new(start, end - start), href, Some(card.clone())));
+                }
             }
             index = range.location + range.length.max(1);
         }
+        links.sort_by_key(|(range, ..)| std::cmp::Reverse(range.location));
+        links.dedup_by_key(|(range, ..)| range.location);
         let mut players = Vec::new();
-        // Insert from the end so earlier ranges stay valid.
-        for (range, href) in links.into_iter().rev() {
-            let start = output.string().paragraphRangeForRange(range).location;
+        // Replace from the end so earlier ranges stay valid.
+        for (replace, href, card) in links {
+            let start = replace.location;
             let attributes =
                 unsafe { output.attributesAtIndex_effectiveRange(start, std::ptr::null_mut()) };
             let placeholder = unsafe {
@@ -2156,7 +2331,14 @@ pub mod native {
                     Some(&attributes),
                 )
             };
-            let size = NSSize::new(VIDEO_WIDTH, VIDEO_WIDTH * 9.0 / 16.0);
+            let size = NSSize::new(
+                VIDEO_WIDTH,
+                if card.is_some() {
+                    160.0
+                } else {
+                    VIDEO_WIDTH * 9.0 / 16.0
+                },
+            );
             let attachment = NSTextAttachment::new();
             // An empty image of the player size keeps the full size for resizing.
             attachment.setImage(Some(&NSImage::initWithSize(NSImage::alloc(), size)));
@@ -2178,12 +2360,48 @@ pub mod native {
                     NSRange::new(0, 1),
                 );
             }
-            output.insertAttributedString_atIndex(&placeholder, start);
-            players.push((href, attachment));
+            output.replaceCharactersInRange_withAttributedString(replace, &placeholder);
+            players.push((href, attachment, card));
         }
         let mut media = Vec::new();
-        for (ordinal, (href, attachment)) in players.into_iter().rev().enumerate() {
-            let key = format!("video:{ordinal}:{href}");
+        for (ordinal, (href, attachment, card)) in players.into_iter().rev().enumerate() {
+            let key = match card {
+                Some(_) => format!("tweet:{appearance:?}:{ordinal}:{href}"),
+                None => format!("video:{ordinal}:{href}"),
+            };
+            if let Some(card) = card {
+                let view = previous.remove(&key).unwrap_or_else(|| {
+                    let configuration = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
+                    let web: Retained<VideoView> = unsafe {
+                        msg_send![VideoView::alloc(mtm), initWithFrame: attachment.bounds(), configuration: &*configuration]
+                    };
+                    let handler = EmbedHeight::alloc(mtm).set_ivars(EmbedHeightIvars {
+                        view: Retained::as_ptr(&web) as usize,
+                    });
+                    let handler: Retained<EmbedHeight> = unsafe { msg_send![super(handler), init] };
+                    unsafe {
+                        web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*web)));
+                        web.setUIDelegate(Some(ProtocolObject::from_ref(&*web)));
+                        web.configuration().userContentController().addScriptMessageHandler_name(
+                            ProtocolObject::from_ref(&*handler),
+                            &NSString::from_str("reader"),
+                        );
+                        if let Some(status) = super::tweet_status(&href) {
+                            web.loadHTMLString_baseURL(
+                                &NSString::from_str(&super::tweet_page(&status, &card, appearance)),
+                                NSURL::URLWithString(&NSString::from_str(VIDEO_ORIGIN)).as_deref(),
+                            );
+                        }
+                    }
+                    web.into_super().into_super()
+                });
+                media.push(Media {
+                    key,
+                    attachment,
+                    view,
+                });
+                continue;
+            }
             let view = previous.remove(&key).unwrap_or_else(|| {
                 let configuration = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
                 unsafe {
@@ -3224,6 +3442,7 @@ pub mod native {
             }
         }
         pub fn set_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+            EMBED_WAKE.with(|embed| *embed.borrow_mut() = Some(wake.clone()));
             *self.bridge.wake.borrow_mut() = Some(wake);
         }
         pub fn take_actions(&self) -> Vec<ReaderAction> {
@@ -3277,6 +3496,7 @@ pub mod native {
                 image_layouts: HashMap::new(),
                 image_links: HashMap::new(),
                 videos: Vec::new(),
+                tweets: Vec::new(),
                 source_sha256: String::new(),
                 blocks: vec![
                     super::Block::Paragraph {
@@ -3436,7 +3656,13 @@ pub mod native {
                     }
                 })
                 .collect();
-            let (attributed, media) = media_overlays(&attributed, &document.videos, previous);
+            let (attributed, media) = media_overlays(
+                &attributed,
+                &document.videos,
+                &document.tweets,
+                self.appearance,
+                previous,
+            );
             // Overlays sit beside the text view, not inside it: NSTextView's own
             // click and attachment gesture recognizers would otherwise claim
             // every click on a player before WebKit sees it.
@@ -3485,6 +3711,37 @@ pub mod native {
                 .map(|storage| attachments(&storage))
                 .unwrap_or_default();
             let available = (width - inset * 2.0).max(80.0);
+            // An X embed reports its rendered height at its current width;
+            // its slot takes that height, so the article flows around it.
+            let mut embeds_changed = false;
+            for item in self
+                .media
+                .iter()
+                .filter(|item| item.key.starts_with("tweet:"))
+            {
+                let shown = item.view.frame().size.width;
+                let reported = EMBED_HEIGHTS.with(|heights| {
+                    heights
+                        .borrow()
+                        .get(&(Retained::as_ptr(&item.view) as usize))
+                        .copied()
+                });
+                if let Some(height) = reported
+                    && shown > 1.0
+                {
+                    let size = NSSize::new(VIDEO_WIDTH, height * VIDEO_WIDTH / shown);
+                    let current = item
+                        .attachment
+                        .image()
+                        .map(|image| image.size())
+                        .unwrap_or_default();
+                    if (current.height - size.height).abs() > 1.0 {
+                        item.attachment
+                            .setImage(Some(&NSImage::initWithSize(NSImage::alloc(), size)));
+                        embeds_changed = true;
+                    }
+                }
+            }
             for (_, attachment) in &placed {
                 let bounds = attachment.bounds();
                 let original = attachment
@@ -3535,6 +3792,17 @@ pub mod native {
             }
             self.document_view.ivars().divider.set(y);
             y += 25.0;
+            if embeds_changed
+                && let (Some(manager), Some(storage)) =
+                    unsafe { (self.text.layoutManager(), self.text.textStorage()) }
+            {
+                unsafe {
+                    manager.invalidateLayoutForCharacterRange_actualCharacterRange(
+                        NSRange::new(0, storage.length()),
+                        std::ptr::null_mut(),
+                    )
+                };
+            }
             let body_height = layout_text(&self.text, content_width);
             self.text.setFrameOrigin(NSPoint::new(inset, y));
             if let (Some(manager), Some(container)) =
