@@ -18,8 +18,10 @@ version for fixes. Each release is a `vX.Y.Z` tag on `main`.
 ### Changed
 - The in-reader PDF view caps portrait pages at a readable width; landscape
   pages still fill the reader.
-- Embedded posts from X/Twitter show as a quoted card: author, text, and a
-  dated "View on X" link, in feeds and saved pages.
+- Embedded posts from X/Twitter show as X's own embed in the reader (avatar,
+  media, quoted post, in the reader's light or dark theme, sized to the post;
+  links open in the default browser). Without a connection the post shows as
+  a quoted card: author, text, and a dated "View on X" link.
 - WhatsApp: the link no longer shows you as online, so your phone keeps its
   notifications.
 - The repository is now `rakshithxaloori/reader-macOS`. Check for Updates
@@ -35,8 +37,8 @@ version for fixes. Each release is a `vX.Y.Z` tag on `main`.
   controls work (the text view's own click handling no longer intercepts
   them), and links out of a player, such as "Watch on YouTube", open in the
   default browser. The empty gap below a video is gone.
-- Embedded X posts on saved Substack pages show as the quote card too,
-  including a quoted post, without the avatar or reply/repost/like counts.
+- Embedded X posts on saved Substack pages are recognized too, including a
+  quoted post.
 
 ## [0.3.7] - 2026-11-08
 
