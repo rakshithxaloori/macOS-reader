@@ -2942,6 +2942,7 @@ dependencies = [
  "ammonia",
  "anyhow",
  "async-trait",
+ "block2 0.6.2",
  "chrono",
  "clap",
  "csv",

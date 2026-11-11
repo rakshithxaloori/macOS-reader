@@ -140,10 +140,17 @@ impl RichDocument {
         out
     }
 }
-/// The page the native reader loads in place of a saved video link: a YouTube
-/// or Vimeo player, or a plain HTML5 player for a direct video file. Links to
-/// anything else stay links.
-pub fn video_player(href: &str) -> Option<String> {
+/// What the native reader loads in place of a saved video link.
+#[derive(Debug, PartialEq)]
+pub enum VideoPlayer {
+    /// A YouTube or Vimeo embed URL, loaded as the top-level page: YouTube's
+    /// player does not start inside a frame of a local HTML page.
+    Frame(String),
+    /// A plain HTML5 player page for a direct video file.
+    Page(String),
+}
+/// The player for a saved video link; links to anything else stay links.
+pub fn video_player(href: &str) -> Option<VideoPlayer> {
     let url = url::Url::parse(href).ok()?;
     if !matches!(url.scheme(), "http" | "https") {
         return None;
@@ -176,11 +183,10 @@ pub fn video_player(href: &str) -> Option<String> {
         }
         _ => None,
     };
-    let body = if let Some(frame) = frame {
-        format!(
-            "<iframe src=\"{frame}\" allow=\"autoplay; encrypted-media; fullscreen; picture-in-picture\" allowfullscreen></iframe>"
-        )
-    } else {
+    if let Some(frame) = frame {
+        return Some(VideoPlayer::Frame(frame));
+    }
+    let body = {
         let file = segments.last()?.to_ascii_lowercase();
         if ![".mp4", ".m4v", ".mov", ".webm"]
             .iter()
@@ -195,9 +201,9 @@ pub fn video_player(href: &str) -> Option<String> {
             .replace('<', "&lt;");
         format!("<video src=\"{source}\" controls playsinline preload=\"metadata\"></video>")
     };
-    Some(format!(
-        "<!doctype html><meta name=\"referrer\" content=\"strict-origin\"><style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}iframe,video{{border:0;width:100%;height:100%;display:block}}</style>{body}"
-    ))
+    Some(VideoPlayer::Page(format!(
+        "<!doctype html><meta name=\"referrer\" content=\"strict-origin\"><style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}video{{border:0;width:100%;height:100%;display:block}}</style>{body}"
+    )))
 }
 fn selector(css: &str) -> Selector {
     Selector::parse(css).expect("static selector")
@@ -950,11 +956,22 @@ mod tests {
                 "https://example.org/a.MP4?x=1&y=2"
             ]
         );
-        let player = |href| video_player(href).unwrap_or_default();
-        assert!(player("https://youtu.be/abc").contains("youtube-nocookie.com/embed/abc\""));
-        assert!(player("https://m.youtube.com/shorts/xyz").contains("/embed/xyz\""));
-        assert!(player("https://vimeo.com/42").contains("player.vimeo.com/video/42\""));
-        assert!(player("https://example.org/a.mp4?x=1&y=2").contains("a.mp4?x=1&amp;y=2\""));
+        let frame = |href: &str, url: &str| {
+            assert_eq!(video_player(href), Some(VideoPlayer::Frame(url.into())))
+        };
+        frame(
+            "https://youtu.be/abc",
+            "https://www.youtube-nocookie.com/embed/abc",
+        );
+        frame(
+            "https://m.youtube.com/shorts/xyz",
+            "https://www.youtube-nocookie.com/embed/xyz",
+        );
+        frame("https://vimeo.com/42", "https://player.vimeo.com/video/42");
+        assert!(matches!(
+            video_player("https://example.org/a.mp4?x=1&y=2"),
+            Some(VideoPlayer::Page(page)) if page.contains("a.mp4?x=1&amp;y=2\"")
+        ));
         for rejected in [
             "https://www.youtube.com/watch?v=a\"b",
             "https://vimeo.com/channel",
@@ -2031,7 +2048,50 @@ pub mod native {
         impl VideoView{
             #[unsafe(method(scrollWheel:))]fn scroll_wheel(&self,event:&objc2_app_kit::NSEvent){if let Some(scroll)=self.enclosingScrollView(){scroll.scrollWheel(event);}}
         }
+        unsafe impl NSObjectProtocol for VideoView {}
+        // Links out of the player ("Watch on YouTube", titles, new windows)
+        // open in the default browser; the player itself stays in place.
+        unsafe impl WKNavigationDelegate for VideoView {
+            #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
+            fn decide_policy(
+                &self,
+                _web: &objc2_web_kit::WKWebView,
+                action: &objc2_web_kit::WKNavigationAction,
+                handler: &block2::DynBlock<dyn Fn(objc2_web_kit::WKNavigationActionPolicy)>,
+            ) {
+                let main = unsafe { action.targetFrame() }.map(|frame| unsafe { frame.isMainFrame() });
+                let link = unsafe { action.navigationType() } == objc2_web_kit::WKNavigationType::LinkActivated;
+                if main.is_none() || (main == Some(true) && link) {
+                    open_request(action);
+                    handler.call((objc2_web_kit::WKNavigationActionPolicy::Cancel,));
+                } else {
+                    handler.call((objc2_web_kit::WKNavigationActionPolicy::Allow,));
+                }
+            }
+        }
+        unsafe impl WKUIDelegate for VideoView {
+            #[unsafe(method(webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:))]
+            fn create_web_view(
+                &self,
+                _web: &objc2_web_kit::WKWebView,
+                _configuration: &objc2_web_kit::WKWebViewConfiguration,
+                action: &objc2_web_kit::WKNavigationAction,
+                _features: &objc2_web_kit::WKWindowFeatures,
+            ) -> *mut objc2_web_kit::WKWebView {
+                open_request(action);
+                std::ptr::null_mut()
+            }
+        }
     );
+    fn open_request(action: &objc2_web_kit::WKNavigationAction) {
+        if let Some(url) = unsafe { action.request() }
+            .URL()
+            .and_then(|url| url.absoluteString())
+        {
+            crate::native_menu::open_url(&url.to_string());
+        }
+    }
+    use objc2_web_kit::{WKNavigationDelegate, WKUIDelegate};
     const VIDEO_WIDTH: f64 = 780.0;
     /// Players load with this origin as their referrer; YouTube refuses an empty one.
     const VIDEO_ORIGIN: &str = "https://reader.rakshithxaloori.com/";
@@ -2125,13 +2185,28 @@ pub mod native {
                 let web: Retained<VideoView> = unsafe {
                     msg_send![VideoView::alloc(mtm), initWithFrame: attachment.bounds(), configuration: &*configuration]
                 };
-                if let Some(page) = super::video_player(&href) {
-                    unsafe {
+                unsafe {
+                    web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*web)));
+                    web.setUIDelegate(Some(ProtocolObject::from_ref(&*web)));
+                }
+                match super::video_player(&href) {
+                    Some(super::VideoPlayer::Frame(frame)) => {
+                        if let Some(url) = NSURL::URLWithString(&NSString::from_str(&frame)) {
+                            let request = objc2_foundation::NSMutableURLRequest::requestWithURL(&url);
+                            request.setValue_forHTTPHeaderField(
+                                Some(&NSString::from_str(VIDEO_ORIGIN)),
+                                &NSString::from_str("Referer"),
+                            );
+                            unsafe { web.loadRequest(&request) };
+                        }
+                    }
+                    Some(super::VideoPlayer::Page(page)) => unsafe {
                         web.loadHTMLString_baseURL(
                             &NSString::from_str(&page),
                             NSURL::URLWithString(&NSString::from_str(VIDEO_ORIGIN)).as_deref(),
-                        )
-                    };
+                        );
+                    },
+                    None => {}
                 }
                 web.into_super().into_super()
             });

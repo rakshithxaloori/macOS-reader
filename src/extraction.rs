@@ -146,7 +146,8 @@ pub fn clean_html(html: &str, base: &str, remote_images: bool) -> String {
         let tag = element.value().name();
         // Feed bodies skip `extract`, so convert players and social cards here too.
         if (matches!(tag, "iframe" | "video")
-            || element.value().attr("data-component-name").is_some())
+            || element.value().attr("data-component-name").is_some()
+            || element.value().classes().any(|c| c == "twitter-embed"))
             && let Some(page) = base
             && let Some(replacement) = embed_html(element, page)
         {
@@ -410,7 +411,11 @@ fn embed_html(node: ElementRef<'_>, page_url: &Url) -> Option<String> {
             escape(&link)
         ));
     }
-    if element.attr("data-component-name") != Some("Twitter2ToDOM") {
+    // Substack's static tweet nests links inside its `<a>` wrapper, which the
+    // HTML parser splits; the `.twitter-embed` card keeps the post's data.
+    if element.attr("data-component-name") != Some("Twitter2ToDOM")
+        && !element.classes().any(|c| c == "twitter-embed")
+    {
         return None;
     }
     let attrs = std::iter::once(node)
@@ -440,6 +445,29 @@ fn embed_html(node: ElementRef<'_>, page_url: &Url) -> Option<String> {
     for paragraph in text.split("\n\n").filter(|p| !p.trim().is_empty()) {
         let lines: Vec<_> = paragraph.trim().lines().map(|l| escape(l.trim())).collect();
         out.push_str(&format!("<p>{}</p>", lines.join("<br>")));
+    }
+    if let Some(quoted) = tweet.get("quoted_tweet") {
+        let q = |name: &str| {
+            quoted
+                .get(name)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+        };
+        let text = Html::parse_fragment(q("full_text"))
+            .root_element()
+            .text()
+            .collect::<String>();
+        if !text.trim().is_empty() {
+            let who = match (q("name"), q("username")) {
+                ("", "") => String::new(),
+                (name, "") => format!("<strong>{}</strong>: ", escape(name)),
+                (name, user) => format!("<strong>{}</strong> @{}: ", escape(name), escape(user)),
+            };
+            out.push_str(&format!(
+                "<blockquote><p>{who}{}</p></blockquote>",
+                escape(text.trim())
+            ));
+        }
     }
     let date = chrono::DateTime::parse_from_rfc3339(field("date"))
         .map(|d| format!(" · {}", d.format("%b %-d, %Y")))
@@ -544,7 +572,7 @@ pub fn extract(body: &str, url: &str) -> Result<Extraction, String> {
         // with "header" classes and empty rule wrappers on density heuristics.
         let nodes: Vec<_> = root
             .select(&select(
-                "figure,img,table,details,.footnote,.footnotes,[role=doc-footnote],[role=doc-endnotes],h1,h2,h3,h4,h5,h6,hr,video,iframe,[data-component-name=VideoEmbedPlayer],[data-component-name=Twitter2ToDOM]",
+                "figure,img,table,details,.footnote,.footnotes,[role=doc-footnote],[role=doc-endnotes],h1,h2,h3,h4,h5,h6,hr,video,iframe,[data-component-name=VideoEmbedPlayer],[data-component-name=Twitter2ToDOM],.twitter-embed",
             ))
             .filter(|n| {
                 !excluded(*n) && (n.value().name() != "iframe" || embed_html(*n, &page_url).is_some())
@@ -1023,6 +1051,33 @@ mod tests {
         );
         assert!(!out.contains("avatar.jpg"), "{out}");
         assert!(!out.contains("READER_PRIVATE_STRUCTURE"), "{out}");
+    }
+    #[test]
+    fn substack_page_tweets_with_nested_links_become_cards() {
+        let prose = "Reading copy keeps every sentence of this paragraph intact. ".repeat(8);
+        let tweet = r#"{"url":"https://x.com/owl/status/9","full_text":"<a class=\"tweet-url\" href=\"https://e.org/p\">e.org/p</a>\n\nNew knob","username":"owl","name":"Owl","date":"2026-11-06T01:01:49.000Z","photos":[],"quoted_tweet":{"full_text":"Dreadds work","username":"zb","name":"Bryan"},"reply_count":4}"#;
+        let html = format!(
+            "<html><body><article><p>{prose}</p>\
+             <a href=\"https://x.com/owl/status/9\" data-component-name=\"Twitter2ToDOM\"><div class=\"twitter-embed\" data-attrs=\"{}\"><div><img src=\"https://e.org/avatar.jpg\"><span>Owl</span></div><div><a href=\"https://e.org/p\">e.org/p</a> New knob</div><div>4 Replies · 10 Reposts</div></div></a>\
+             <p>{prose}</p></article></body></html>",
+            escape(tweet)
+        );
+        let out = extract(&html, "https://example.org/p/post").unwrap().html;
+        assert!(
+            out.contains("<blockquote><p><strong>Owl</strong> @owl</p>"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "<blockquote><p><strong>Bryan</strong> @zb: Dreadds work</p></blockquote>"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("View on X · Nov 6, 2026</a>"), "{out}");
+        assert!(
+            !out.contains("avatar.jpg") && !out.contains("Reposts"),
+            "{out}"
+        );
     }
     #[test]
     fn feed_bodies_keep_video_players_and_tweet_cards() {
